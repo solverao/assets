@@ -1,0 +1,15 @@
+# Binario compilado
+/asset
+/asset.exe
+
+# Artefactos de test
+*.test
+coverage.out
+coverage.html
+
+# Release
+dist/
+
+# Editor
+.idea/
+.vscode/

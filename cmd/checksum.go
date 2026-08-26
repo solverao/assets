@@ -7,7 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"runtime"
+	"sort"
 	"sync"
 
 	"github.com/schollz/progressbar/v3"
@@ -15,6 +15,7 @@ import (
 )
 
 var checkDir string
+var checkOutput string
 
 type FileResult struct {
 	Path     string
@@ -25,22 +26,19 @@ type FileResult struct {
 var checksumCmd = &cobra.Command{
 	Use:   "checksum",
 	Short: "Calcula los checksums SHA-256 masivamente",
-	Run: func(cmd *cobra.Command, args []string) {
-		if err := RunChecksumLogic(checkDir); err != nil {
-			fmt.Printf("Error fatal en checksums: %v\n", err)
-			os.Exit(1)
-		}
+	RunE: func(cmd *cobra.Command, args []string) error {
+		return RunChecksumLogic(checkDir, checkOutput)
 	},
 }
 
 func init() {
 	rootCmd.AddCommand(checksumCmd)
 	checksumCmd.Flags().StringVarP(&checkDir, "dir", "d", "", "Directorio a procesar (requerido)")
+	checksumCmd.Flags().StringVarP(&checkOutput, "output", "o", "checksums.txt", "Nombre del fichero de checksums")
 	checksumCmd.MarkFlagRequired("dir")
 }
 
-func RunChecksumLogic(targetDir string) error {
-	var totalFiles int
+func RunChecksumLogic(targetDir, outputFile string) error {
 	var filesToProcess []string
 
 	err := filepath.WalkDir(targetDir, func(path string, d os.DirEntry, err error) error {
@@ -49,7 +47,6 @@ func RunChecksumLogic(targetDir string) error {
 		}
 		if !d.IsDir() {
 			filesToProcess = append(filesToProcess, path)
-			totalFiles++
 		}
 		return nil
 	})
@@ -57,27 +54,38 @@ func RunChecksumLogic(targetDir string) error {
 	if err != nil {
 		return err
 	}
-	if totalFiles == 0 {
+	if len(filesToProcess) == 0 {
 		fmt.Println("No hay archivos para procesar checksums.")
 		return nil
 	}
 
-	bar := progressbar.Default(int64(totalFiles), "Calculando Checksums")
+	totalFiles := len(filesToProcess)
+	bar := progressbar.NewOptions(totalFiles,
+		progressbar.OptionSetWriter(os.Stderr),
+		progressbar.OptionSetDescription("Calculando Checksums"),
+	)
+
 	jobs := make(chan string, totalFiles)
 	results := make(chan FileResult, totalFiles)
 	var wg sync.WaitGroup
+	var drainer sync.WaitGroup
 
-	numWorkers := runtime.NumCPU()
-	for w := 1; w <= numWorkers; w++ {
+	nw := numWorkers()
+	for w := 1; w <= nw; w++ {
 		wg.Add(1)
 		go checksumWorker(jobs, results, &wg)
 	}
 
+	var checksums []FileResult
+	drainer.Add(1)
 	go func() {
+		defer drainer.Done()
 		for res := range results {
 			bar.Add(1)
 			if res.Err != nil {
 				bar.Describe(fmt.Sprintf("[ERROR] %s", filepath.Base(res.Path)))
+			} else {
+				checksums = append(checksums, res)
 			}
 		}
 	}()
@@ -88,8 +96,41 @@ func RunChecksumLogic(targetDir string) error {
 	close(jobs)
 	wg.Wait()
 	close(results)
+	drainer.Wait()
 
-	fmt.Println("\nCálculo de checksums completado.")
+	fmt.Println()
+
+	sort.Slice(checksums, func(i, j int) bool {
+		return checksums[i].Path < checksums[j].Path
+	})
+
+	if len(checksums) > 0 {
+		if err := writeChecksumsFile(targetDir, outputFile, checksums); err != nil {
+			return err
+		}
+	}
+
+	fmt.Printf("Cálculo de checksums completado. %d archivos procesados.\n", len(checksums))
+	return nil
+}
+
+func writeChecksumsFile(targetDir, outputFile string, results []FileResult) error {
+	outPath := filepath.Join(targetDir, outputFile)
+	f, err := os.Create(outPath)
+	if err != nil {
+		return fmt.Errorf("error creando %s: %w", outPath, err)
+	}
+	defer f.Close()
+
+	for _, res := range results {
+		rel, relErr := filepath.Rel(targetDir, res.Path)
+		if relErr != nil {
+			rel = res.Path
+		}
+		if _, err := fmt.Fprintf(f, "%s  %s\n", res.Checksum, rel); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 

@@ -8,9 +8,9 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/bodgit/sevenzip"
 	"github.com/nwaples/rardecode"
@@ -25,14 +25,36 @@ type ExtractResult struct {
 	Err    error
 }
 
+type extractJob struct {
+	path   string
+	relDir string
+}
+
+// detectArchiveType devuelve "zip", "targz", "rar" o "7z" según la
+// extensión del archivo, o "" si no es un formato soportado.
+func detectArchiveType(path string) string {
+	lower := strings.ToLower(path)
+	if strings.HasSuffix(lower, ".tar.gz") {
+		return "targz"
+	}
+	switch strings.ToLower(filepath.Ext(path)) {
+	case ".zip":
+		return "zip"
+	case ".tgz":
+		return "targz"
+	case ".rar":
+		return "rar"
+	case ".7z":
+		return "7z"
+	}
+	return ""
+}
+
 var extractCmd = &cobra.Command{
 	Use:   "extract",
 	Short: "Extrae archivos comprimidos (ZIP, TAR.GZ, RAR, 7Z) masivamente",
-	Run: func(cmd *cobra.Command, args []string) {
-		if err := RunExtractionLogic(srcDir, destDir); err != nil {
-			fmt.Printf("Error fatal en extracción: %v\n", err)
-			os.Exit(1)
-		}
+	RunE: func(cmd *cobra.Command, args []string) error {
+		return RunExtractionLogic(srcDir, destDir)
 	},
 }
 
@@ -50,17 +72,20 @@ func RunExtractionLogic(src string, dest string) error {
 		return fmt.Errorf("error creando directorio destino: %w", err)
 	}
 
-	jobs := make(chan string, 100)
+	jobs := make(chan extractJob, 100)
 	results := make(chan ExtractResult, 100)
 	var wg sync.WaitGroup
+	var drainer sync.WaitGroup
 
-	numWorkers := runtime.NumCPU()
-	for w := 1; w <= numWorkers; w++ {
+	nw := numWorkers()
+	for w := 1; w <= nw; w++ {
 		wg.Add(1)
 		go extractWorker(jobs, results, &wg, dest)
 	}
 
+	drainer.Add(1)
 	go func() {
+		defer drainer.Done()
 		for res := range results {
 			if res.Err != nil {
 				fmt.Printf("[ERROR] %s: %v\n", filepath.Base(res.Source), res.Err)
@@ -73,12 +98,13 @@ func RunExtractionLogic(src string, dest string) error {
 		if err != nil {
 			return err
 		}
-		if !d.IsDir() {
-			ext := strings.ToLower(filepath.Ext(path))
-			if ext == ".zip" || ext == ".gz" || ext == ".tgz" || ext == ".rar" || ext == ".7z" {
-				jobs <- path
-				count++
+		if !d.IsDir() && detectArchiveType(path) != "" {
+			relDir, relErr := filepath.Rel(src, filepath.Dir(path))
+			if relErr != nil {
+				relDir = filepath.Dir(path)
 			}
+			jobs <- extractJob{path: path, relDir: relDir}
+			count++
 		}
 		return nil
 	})
@@ -87,53 +113,93 @@ func RunExtractionLogic(src string, dest string) error {
 		close(jobs)
 		wg.Wait()
 		close(results)
+		drainer.Wait()
 		return fmt.Errorf("error leyendo origen: %w", err)
 	}
 
 	close(jobs)
 	wg.Wait()
 	close(results)
+	drainer.Wait()
 	fmt.Printf("Extracción completada. %d archivos procesados.\n", count)
 	return nil
 }
 
-func extractWorker(jobs <-chan string, results chan<- ExtractResult, wg *sync.WaitGroup, dest string) {
+func extractWorker(jobs <-chan extractJob, results chan<- ExtractResult, wg *sync.WaitGroup, dest string) {
 	defer wg.Done()
 
-	for path := range jobs {
+	for job := range jobs {
 		var err error
 
-		baseName := filepath.Base(path)
+		baseName := filepath.Base(job.path)
 		folderName := strings.TrimSuffix(baseName, filepath.Ext(baseName))
 
 		if strings.ToLower(filepath.Ext(folderName)) == ".tar" {
 			folderName = strings.TrimSuffix(folderName, filepath.Ext(folderName))
 		}
 
-		archiveDest := filepath.Join(dest, folderName)
-		ext := strings.ToLower(filepath.Ext(path))
+		archiveDest := filepath.Join(dest, job.relDir, folderName)
+		debugf("Extrayendo %s -> %s", job.path, archiveDest)
 
-		if ext == ".zip" {
-			err = extractZip(path, archiveDest)
-		} else if ext == ".tar.gz" || ext == ".tgz" || ext == ".gz" {
-			err = extractTarGz(path, archiveDest)
-		} else if ext == ".rar" {
-			err = extractRar(path, archiveDest)
-		} else if ext == ".7z" {
-			err = extract7z(path, archiveDest)
-		} else {
+		switch detectArchiveType(job.path) {
+		case "zip":
+			err = extractZip(job.path, archiveDest)
+		case "targz":
+			err = extractTarGz(job.path, archiveDest)
+		case "rar":
+			err = extractRar(job.path, archiveDest)
+		case "7z":
+			err = extract7z(job.path, archiveDest)
+		default:
 			err = fmt.Errorf("formato no soportado")
 		}
 
-		// NUEVO: Si la extracción fue exitosa, aplicamos la Extracción Inteligente
+		// Si la extracción fue exitosa, aplicamos la Extracción Inteligente
 		if err == nil {
 			if flattenErr := flattenSingleDirectory(archiveDest); flattenErr != nil {
 				// Si falla el aplanamiento lo registramos, pero no detenemos todo
-				fmt.Printf("[WARN] No se pudo aplanar %s: %v\n", folderName, flattenErr)
+				warnf("No se pudo aplanar %s: %v", folderName, flattenErr)
 			}
 		}
 
-		results <- ExtractResult{Source: path, Err: err}
+		results <- ExtractResult{Source: job.path, Err: err}
+	}
+}
+
+// maxExtractedFileSize limita el tamaño descomprimido por archivo para
+// mitigar ataques de tipo "zip bomb".
+const maxExtractedFileSize = int64(2 << 30) // 2 GiB
+
+// limitedWriter corta la escritura cuando se supera el tamaño máximo.
+type limitedWriter struct {
+	w       io.Writer
+	max     int64
+	written int64
+}
+
+func (l *limitedWriter) Write(p []byte) (int, error) {
+	if l.written+int64(len(p)) > l.max {
+		return 0, fmt.Errorf("límite de tamaño excedido (%d bytes)", l.max)
+	}
+	n, err := l.w.Write(p)
+	l.written += int64(n)
+	return n, err
+}
+
+// copyLimited copia src a dst deteniéndose con error si se supera max bytes.
+func copyLimited(dst io.Writer, src io.Reader) error {
+	lw := &limitedWriter{w: dst, max: maxExtractedFileSize}
+	_, err := io.Copy(lw, src)
+	return err
+}
+
+// setFileTimes fija el timestamp de modificación si está disponible.
+func setFileTimes(path string, mtime time.Time) {
+	if mtime.IsZero() {
+		return
+	}
+	if err := os.Chtimes(path, mtime, mtime); err != nil {
+		debugf("No se pudo fijar timestamps para %s: %v", path, err)
 	}
 }
 
@@ -156,6 +222,10 @@ func extractZipFile(f *zip.File, dest string) error {
 	if !strings.HasPrefix(path, filepath.Clean(dest)+string(os.PathSeparator)) {
 		return fmt.Errorf("zipslip: %s", f.Name)
 	}
+	if f.Mode()&os.ModeSymlink != 0 {
+		debugf("Saltando symlink: %s", f.Name)
+		return nil
+	}
 	if f.FileInfo().IsDir() {
 		return os.MkdirAll(path, os.ModePerm)
 	}
@@ -172,8 +242,11 @@ func extractZipFile(f *zip.File, dest string) error {
 		return err
 	}
 	defer srcFile.Close()
-	_, err = io.Copy(dstFile, srcFile)
-	return err
+	if err := copyLimited(dstFile, srcFile); err != nil {
+		return err
+	}
+	setFileTimes(path, f.Modified)
+	return nil
 }
 
 func extractTarGz(src, dest string) error {
@@ -200,6 +273,10 @@ func extractTarGz(src, dest string) error {
 		if !strings.HasPrefix(path, filepath.Clean(dest)+string(os.PathSeparator)) {
 			return fmt.Errorf("zipslip: %s", header.Name)
 		}
+		if header.Typeflag == tar.TypeSymlink || header.Typeflag == tar.TypeLink {
+			debugf("Saltando symlink: %s", header.Name)
+			continue
+		}
 		if header.Typeflag == tar.TypeDir {
 			if err := os.MkdirAll(path, 0755); err != nil {
 				return err
@@ -212,11 +289,12 @@ func extractTarGz(src, dest string) error {
 			if err != nil {
 				return err
 			}
-			if _, err := io.Copy(dstFile, tr); err != nil {
+			if err := copyLimited(dstFile, tr); err != nil {
 				dstFile.Close()
 				return err
 			}
 			dstFile.Close()
+			setFileTimes(path, header.ModTime)
 		}
 	}
 	return nil
@@ -246,6 +324,10 @@ func extractRar(src, dest string) error {
 			}
 			continue
 		}
+		if header.Mode()&os.ModeSymlink != 0 {
+			debugf("Saltando symlink: %s", header.Name)
+			continue
+		}
 		if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
 			return err
 		}
@@ -253,11 +335,12 @@ func extractRar(src, dest string) error {
 		if err != nil {
 			return err
 		}
-		if _, err := io.Copy(dstFile, rr); err != nil {
+		if err := copyLimited(dstFile, rr); err != nil {
 			dstFile.Close()
 			return err
 		}
 		dstFile.Close()
+		setFileTimes(path, header.ModificationTime)
 	}
 	return nil
 }
@@ -279,6 +362,10 @@ func extract7z(src, dest string) error {
 			}
 			continue
 		}
+		if f.Mode()&os.ModeSymlink != 0 {
+			debugf("Saltando symlink: %s", f.Name)
+			continue
+		}
 		if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
 			return err
 		}
@@ -291,12 +378,13 @@ func extract7z(src, dest string) error {
 			dstFile.Close()
 			return err
 		}
-		_, err = io.Copy(dstFile, srcFile)
+		err = copyLimited(dstFile, srcFile)
 		srcFile.Close()
 		dstFile.Close()
 		if err != nil {
 			return err
 		}
+		setFileTimes(path, f.Modified)
 	}
 	return nil
 }

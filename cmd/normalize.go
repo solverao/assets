@@ -12,26 +12,25 @@ import (
 )
 
 var normDir string
+var normDryRun bool
 var slugRegex = regexp.MustCompile(`[^a-z0-9]+`)
 
 var normalizeCmd = &cobra.Command{
 	Use:   "normalize",
 	Short: "Normaliza recursivamente nombres de archivos a slugs",
-	Run: func(cmd *cobra.Command, args []string) {
-		if err := RunNormalizationLogic(normDir); err != nil {
-			fmt.Printf("Error fatal en normalización: %v\n", err)
-			os.Exit(1)
-		}
+	RunE: func(cmd *cobra.Command, args []string) error {
+		return RunNormalizationLogic(normDir, normDryRun)
 	},
 }
 
 func init() {
 	rootCmd.AddCommand(normalizeCmd)
 	normalizeCmd.Flags().StringVarP(&normDir, "dir", "d", "", "Directorio a normalizar (requerido)")
+	normalizeCmd.Flags().BoolVar(&normDryRun, "dry-run", false, "Mostrar los cambios sin aplicarlos")
 	normalizeCmd.MarkFlagRequired("dir")
 }
 
-func RunNormalizationLogic(targetDir string) error {
+func RunNormalizationLogic(targetDir string, dryRun bool) error {
 	var paths []string
 
 	err := filepath.WalkDir(targetDir, func(path string, d os.DirEntry, err error) error {
@@ -82,6 +81,11 @@ func RunNormalizationLogic(targetDir string) error {
 				finalPath = filepath.Join(dir, fmt.Sprintf("%s-%d%s", base, counter, ext))
 			}
 			counter++
+		}
+
+		if dryRun {
+			fmt.Printf("Renombraría %s -> %s\n", path, finalPath)
+			continue
 		}
 
 		if err := os.Rename(path, finalPath); err == nil {
