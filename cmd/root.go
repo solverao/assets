@@ -5,6 +5,10 @@ import (
 	"os"
 	"runtime"
 
+	"asset/internal/checksum"
+	"asset/internal/extract"
+	"asset/internal/normalize"
+
 	"github.com/spf13/cobra"
 )
 
@@ -12,8 +16,9 @@ import (
 var version = "dev"
 
 var (
-	verbose bool
-	workers int
+	verbose    bool
+	workers    int
+	syncWrites bool
 )
 
 var rootCmd = &cobra.Command{
@@ -25,7 +30,14 @@ var rootCmd = &cobra.Command{
 
 func init() {
 	rootCmd.PersistentFlags().BoolVarP(&verbose, "verbose", "v", false, "Mostrar información de depuración")
-	rootCmd.PersistentFlags().IntVarP(&workers, "workers", "w", runtime.NumCPU(), "Número de workers concurrentes")
+	rootCmd.PersistentFlags().IntVarP(&workers, "workers", "w", 0, "Número de workers concurrentes (0 = auto)")
+	rootCmd.PersistentFlags().BoolVar(&syncWrites, "sync", true, "Sincronizar escrituras a disco (fsync) para mayor durabilidad")
+
+	rootCmd.AddCommand(NewExtractCmd(extract.NewExtractorService()))
+	rootCmd.AddCommand(NewNormalizeCmd(normalize.NewNormalizerService()))
+	rootCmd.AddCommand(NewChecksumCmd(checksum.NewChecksumService()))
+	rootCmd.AddCommand(NewPipelineCmd(normalize.NewNormalizerService(), checksum.NewChecksumService()))
+	rootCmd.AddCommand(NewScanCmd())
 }
 
 func Execute() {

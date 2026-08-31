@@ -1,6 +1,9 @@
 package cmd
 
 import (
+	"asset/internal/checksum"
+	"asset/internal/extract"
+	"asset/internal/normalize"
 	"os"
 	"path/filepath"
 	"strings"
@@ -19,13 +22,13 @@ func TestIntegrationPipeline(t *testing.T) {
 		"Proyecto Demo/archivo Uno.txt": "contenido",
 	})
 
-	if err := RunExtractionLogic(src, dest); err != nil {
+	if err := extract.NewExtractorService().ExtractAll(src, dest, 2, false, 0); err != nil {
 		t.Fatal(err)
 	}
-	if err := RunNormalizationLogic(dest, false); err != nil {
+	if err := normalize.NewNormalizerService().NormalizeAll(dest, false); err != nil {
 		t.Fatal(err)
 	}
-	if err := RunChecksumLogic(dest, "checksums.txt"); err != nil {
+	if err := checksum.NewChecksumService().ChecksumAll(dest, "checksums.txt", 2); err != nil {
 		t.Fatal(err)
 	}
 

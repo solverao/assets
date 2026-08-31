@@ -1,6 +1,8 @@
 package cmd
 
 import (
+	"asset/internal/checksum"
+	"asset/internal/normalize"
 	"context"
 	"errors"
 	"fmt"
@@ -13,28 +15,29 @@ import (
 	"github.com/spf13/cobra"
 )
 
-var pipeSrc string
-var pipeDest string
-var pipeDryRun bool
+func NewPipelineCmd(normalizer *normalize.NormalizerService, checksummer *checksum.ChecksumService) *cobra.Command {
+	var pipeSrc string
+	var pipeDest string
+	var pipeDryRun bool
 
-var pipelineCmd = &cobra.Command{
-	Use:   "pipeline",
-	Short: "Ejecuta Extract -> Normalize -> Checksum -> Move",
-	RunE: func(cmd *cobra.Command, args []string) error {
-		return runPipeline(cmd.Context())
-	},
+	cmd := &cobra.Command{
+		Use:   "pipeline",
+		Short: "Ejecuta Extract -> Normalize -> Checksum -> Move",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runPipeline(cmd.Context(), normalizer, checksummer, pipeSrc, pipeDest, pipeDryRun)
+		},
+	}
+
+	cmd.Flags().StringVarP(&pipeSrc, "src", "s", "", "Directorio origen")
+	cmd.Flags().StringVarP(&pipeDest, "dest", "d", "", "Directorio destino final")
+	cmd.Flags().BoolVar(&pipeDryRun, "dry-run", false, "Mostrar los movimientos sin aplicarlos")
+	cmd.MarkFlagRequired("src")
+	cmd.MarkFlagRequired("dest")
+
+	return cmd
 }
 
-func init() {
-	rootCmd.AddCommand(pipelineCmd)
-	pipelineCmd.Flags().StringVarP(&pipeSrc, "src", "s", "", "Directorio origen")
-	pipelineCmd.Flags().StringVarP(&pipeDest, "dest", "d", "", "Directorio destino final")
-	pipelineCmd.Flags().BoolVar(&pipeDryRun, "dry-run", false, "Mostrar los movimientos sin aplicarlos")
-	pipelineCmd.MarkFlagRequired("src")
-	pipelineCmd.MarkFlagRequired("dest")
-}
-
-func runPipeline(ctx context.Context) error {
+func runPipeline(ctx context.Context, normalizer *normalize.NormalizerService, checksummer *checksum.ChecksumService, src, dest string, dryRun bool) error {
 	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
@@ -47,31 +50,31 @@ func runPipeline(ctx context.Context) error {
 	defer os.RemoveAll(tmpDir)
 	fmt.Printf("[1/5] Temporal creado: %s\n", tmpDir)
 
-	fmt.Println("\n[2/5] Extrayendo archivos...")
-	if err := RunExtractionLogic(pipeSrc, tmpDir); err != nil {
-		return fmt.Errorf("fallo en extracción: %w", err)
-	}
+	// fmt.Println("\n[2/5] Extrayendo archivos...")
+	// if err := RunExtractionLogic(src, tmpDir); err != nil {
+	// 	return fmt.Errorf("fallo en extracción: %w", err)
+	// }
 
 	fmt.Println("\n[3/5] Normalizando nombres...")
-	if err := RunNormalizationLogic(tmpDir, false); err != nil {
+	if err := normalizer.NormalizeAll(tmpDir, false); err != nil {
 		return fmt.Errorf("fallo en normalización: %w", err)
 	}
 
 	fmt.Println("\n[4/5] Calculando Checksums...")
-	if err := RunChecksumLogic(tmpDir, "checksums.txt"); err != nil {
+	if err := checksummer.ChecksumAll(tmpDir, "checksums.txt", numWorkers()); err != nil {
 		return fmt.Errorf("fallo en checksums: %w", err)
 	}
 
-	if pipeDryRun {
+	if dryRun {
 		fmt.Println("\n[5/5] Moviendo al destino final (dry-run)...")
-		return walkAndMove(ctx, tmpDir, pipeDest, true)
+		return walkAndMove(ctx, tmpDir, dest, true)
 	}
 
 	fmt.Println("\n[5/5] Moviendo al destino final...")
-	if err := os.MkdirAll(pipeDest, os.ModePerm); err != nil {
+	if err := os.MkdirAll(dest, os.ModePerm); err != nil {
 		return fmt.Errorf("error creando destino: %w", err)
 	}
-	return walkAndMove(ctx, tmpDir, pipeDest, false)
+	return walkAndMove(ctx, tmpDir, dest, false)
 }
 
 func walkAndMove(ctx context.Context, tmpDir, dest string, dryRun bool) error {
