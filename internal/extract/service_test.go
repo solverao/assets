@@ -450,3 +450,67 @@ func TestExtractAllZipIgnoresPassword(t *testing.T) {
 		t.Fatalf("extracción no encontrada: %v", err)
 	}
 }
+
+func TestExtractAllIncludeFiles(t *testing.T) {
+	src := t.TempDir()
+	sub := filepath.Join(src, "sub")
+	if err := os.MkdirAll(sub, 0755); err != nil {
+		t.Fatal(err)
+	}
+	makeZip(t, filepath.Join(sub, "a.zip"), map[string]string{"x.txt": "a"})
+	if err := os.WriteFile(filepath.Join(sub, "suelto.txt"), []byte("suelto"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	dest := t.TempDir()
+	if err := NewExtractorService().ExtractAll(context.Background(), ExtractOptions{
+		Src: src, Dest: dest, Workers: 2, IncludeFiles: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := os.Stat(filepath.Join(dest, "sub", "a", "x.txt")); err != nil {
+		t.Fatalf("comprimido no extraído: %v", err)
+	}
+	if data, err := os.ReadFile(filepath.Join(dest, "sub", "suelto.txt")); err != nil || string(data) != "suelto" {
+		t.Fatalf("suelto no copiado: %v (data=%q)", err, data)
+	}
+}
+
+func TestExtractAllExcludesFilesByDefault(t *testing.T) {
+	src := t.TempDir()
+	if err := os.WriteFile(filepath.Join(src, "suelto.txt"), []byte("suelto"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	dest := t.TempDir()
+	if err := NewExtractorService().ExtractAll(context.Background(), ExtractOptions{
+		Src: src, Dest: dest, Workers: 1,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(dest, "suelto.txt")); !os.IsNotExist(err) {
+		t.Fatalf("el suelto no debería copiarse sin IncludeFiles: %v", err)
+	}
+}
+
+func TestExtractAllRemoveSourceCopy(t *testing.T) {
+	src := t.TempDir()
+	loose := filepath.Join(src, "suelto.txt")
+	if err := os.WriteFile(loose, []byte("suelto"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	dest := t.TempDir()
+	if err := NewExtractorService().ExtractAll(context.Background(), ExtractOptions{
+		Src: src, Dest: dest, Workers: 1, IncludeFiles: true, RemoveSource: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(loose); !os.IsNotExist(err) {
+		t.Fatalf("el origen suelto debería haberse borrado con remove-source: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dest, "suelto.txt")); err != nil {
+		t.Fatalf("copia no encontrada: %v", err)
+	}
+}

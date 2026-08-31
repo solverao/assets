@@ -38,6 +38,9 @@ type ExtractOptions struct {
 	RemoveSource bool
 	ErrorDir     string
 	Password     string
+	// IncludeFiles, si es true, copia también los archivos que no son
+	// comprimidos (preservando la subestructura) además de extraer.
+	IncludeFiles bool
 }
 
 type ExtractResult struct {
@@ -70,6 +73,7 @@ func (s *ExtractorService) ExtractAll(ctx context.Context, opts ExtractOptions) 
 	removeSource := opts.RemoveSource
 	errorDir := opts.ErrorDir
 	password := opts.Password
+	includeFiles := opts.IncludeFiles
 
 	fmt.Printf("Buscando comprimidos en: %s\n", src)
 	if err := os.MkdirAll(dest, os.ModePerm); err != nil {
@@ -91,14 +95,20 @@ func (s *ExtractorService) ExtractAll(ctx context.Context, opts ExtractOptions) 
 			return nil
 		}
 		kind, folder, isCont, ok := classifyArchive(path)
-		if !ok || isCont {
-			return nil
-		}
 		relDir, relErr := filepath.Rel(src, filepath.Dir(path))
 		if relErr != nil {
 			relDir = filepath.Dir(path)
 		}
-		jobs = append(jobs, extractJob{path: path, relDir: relDir, folder: folder, kind: kind})
+		if ok {
+			if isCont {
+				return nil
+			}
+			jobs = append(jobs, extractJob{path: path, relDir: relDir, folder: folder, kind: kind})
+			return nil
+		}
+		if includeFiles {
+			jobs = append(jobs, extractJob{path: path, relDir: relDir, folder: filepath.Base(path), kind: "copy"})
+		}
 		return nil
 	})
 	if err != nil {
@@ -275,6 +285,9 @@ func extractWorker(ctx context.Context, jobs <-chan extractJob, results chan<- E
 			volumes, err = extractRar(ctx, job.path, archiveDest, doSync, password)
 		case "7z":
 			volumes, err = extract7z(ctx, job.path, archiveDest, doSync, password)
+		case "copy":
+			err = copyFile(ctx, dest, job.path, archiveDest, doSync)
+			volumes = []string{job.path}
 		default:
 			err = fmt.Errorf("formato no soportado")
 		}
@@ -291,9 +304,12 @@ func extractWorker(ctx context.Context, jobs <-chan extractJob, results chan<- E
 			}
 		} else {
 			// Si la extracción fue exitosa, aplicamos la Extracción Inteligente
-			if flattenErr := flattenSingleDirectory(archiveDest, doSync); flattenErr != nil {
-				// Si falla el aplanamiento lo registramos, pero no detenemos todo
-				warnf("No se pudo aplanar %s: %v", job.folder, flattenErr)
+			// (solo para comprimidos, no para copias de archivos sueltos).
+			if job.kind != "copy" {
+				if flattenErr := flattenSingleDirectory(archiveDest, doSync); flattenErr != nil {
+					// Si falla el aplanamiento lo registramos, pero no detenemos todo
+					warnf("No se pudo aplanar %s: %v", job.folder, flattenErr)
+				}
 			}
 			if removeSource {
 				for _, v := range volumes {
@@ -437,6 +453,42 @@ func copyLimitedCtx(ctx context.Context, dst io.Writer, src io.Reader) error {
 	lw := &limitedWriter{w: dst, max: maxExtractedFileSize}
 	_, err := io.Copy(lw, &ctxReader{ctx: ctx, r: src})
 	return err
+}
+
+// copyFile copia un archivo suelto a dst (bajo root), preservando modo y
+// timestamp. Se usa para arrastrar archivos no comprimidos con IncludeFiles.
+func copyFile(ctx context.Context, root, src, dst string, doSync bool) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+
+	info, err := in.Stat()
+	if err != nil {
+		return err
+	}
+
+	if err := mkdirAllNoSymlink(root, filepath.Dir(dst), os.ModePerm); err != nil {
+		return err
+	}
+
+	out, err := openFileNoFollow(dst, sanitizeMode(info.Mode()))
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(out, &ctxReader{ctx: ctx, r: in}); err != nil {
+		out.Close()
+		return err
+	}
+	if err := closeFile(out, doSync); err != nil {
+		return err
+	}
+	if doSync {
+		syncDir(filepath.Dir(dst))
+	}
+	setFileTimes(dst, info.ModTime())
+	return nil
 }
 
 // setFileTimes fija el timestamp de modificación si está disponible.

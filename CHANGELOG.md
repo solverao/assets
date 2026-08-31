@@ -15,7 +15,8 @@ y el proyecto sigue [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Subcomando `process` que encadena `Extract -> Normalize -> Checksum -> Move`.
 - Subcomando `ingest` que ejecuta `process` e indexa el resultado en la base de datos.
 - Subcomando `scan` que indexa un árbol de archivos en SQLite.
-- Subcomando `db` para gestionar la base de datos (`init`, `info`, `migrate`, `list`, `delete`).
+- Subcomando `db` para gestionar la base de datos (`init`, `info`, `migrate`, `migrations`, `delete`).
+- Subcomando `vault` para gestionar bóvedas (bases de datos con nombre): `list`, `create`, `use`, `current`, `delete`, `path`.
 - Flags globales `--verbose`, `--workers`, `--sync` y `--db` (o variable `ASSET_DB`).
 - Flag `--dry-run` en `normalize`, `process` e `ingest`.
 - Flag `--output` en `checksum`.
@@ -23,6 +24,7 @@ y el proyecto sigue [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Flag `--remove-source` en `extract`, `process` e `ingest`.
 - Flag `--error-dir` (cuarentena) y manifiesto `errores.txt` para archivos corruptos o incompletos.
 - Flag `--password` para comprimidos cifrados (RAR y 7z).
+- `process` e `ingest` copian también los archivos que no son comprimidos (flag `--include-files` en `extract`).
 - Cancelación de la extracción vía `context.Context` (Ctrl+C).
 - Aislamiento de código dependiente de SO con build tags (compila en Windows y macOS).
 - Migración del driver de SQLite a `modernc.org/sqlite` (pure Go, sin cgo) y búsqueda full-text FTS5.

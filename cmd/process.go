@@ -74,6 +74,7 @@ func runProcess(ctx context.Context, extractor *extract.ExtractorService, normal
 		RemoveSource: removeSource,
 		ErrorDir:     errorDir,
 		Password:     password,
+		IncludeFiles: true,
 	}); err != nil {
 		return fmt.Errorf("fallo en extracción: %w", err)
 	}

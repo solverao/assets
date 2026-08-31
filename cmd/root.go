@@ -9,6 +9,7 @@ import (
 	"asset/internal/checksum"
 	"asset/internal/extract"
 	"asset/internal/normalize"
+	"asset/internal/vault"
 
 	"github.com/spf13/cobra"
 )
@@ -34,7 +35,14 @@ func init() {
 	rootCmd.PersistentFlags().BoolVarP(&verbose, "verbose", "v", false, "Mostrar información de depuración")
 	rootCmd.PersistentFlags().IntVarP(&workers, "workers", "w", 0, "Número de workers concurrentes (0 = auto)")
 	rootCmd.PersistentFlags().BoolVar(&syncWrites, "sync", true, "Sincronizar escrituras a disco (fsync) para mayor durabilidad")
-	rootCmd.PersistentFlags().StringVar(&dbPath, "db", defaultDBPath(), "Ruta de la base de datos SQLite")
+	rootCmd.PersistentFlags().StringVar(&dbPath, "db", "", "Ruta de la base de datos SQLite (por defecto, bóveda actual o ASSET_DB)")
+
+	rootCmd.PersistentPreRunE = func(cmd *cobra.Command, args []string) error {
+		if dbPath == "" {
+			dbPath = resolveDBPath()
+		}
+		return nil
+	}
 
 	rootCmd.AddCommand(NewExtractCmd(extract.NewExtractorService()))
 	rootCmd.AddCommand(NewNormalizeCmd(normalize.NewNormalizerService()))
@@ -43,11 +51,27 @@ func init() {
 	rootCmd.AddCommand(NewIngestCmd(extract.NewExtractorService(), normalize.NewNormalizerService(), checksum.NewChecksumService()))
 	rootCmd.AddCommand(NewScanCmd())
 	rootCmd.AddCommand(NewDBCmd())
+	rootCmd.AddCommand(NewVaultCmd())
 }
 
-func defaultDBPath() string {
+// resolveDBPath determina la ruta de la BD: ASSET_DB -> bóveda actual -> assets.db.
+func resolveDBPath() string {
 	if p := os.Getenv("ASSET_DB"); p != "" {
 		return p
+	}
+	dir, err := vault.ConfigDir()
+	if err != nil {
+		return "assets.db"
+	}
+	return resolveDBPathFrom(dir)
+}
+
+// resolveDBPathFrom resuelve la BD a partir del registro de bóvedas en dir.
+func resolveDBPathFrom(dir string) string {
+	if r, err := vault.Load(dir); err == nil && r.Current != "" {
+		if p, ok := r.Vaults[r.Current]; ok && p != "" {
+			return p
+		}
 	}
 	return "assets.db"
 }

@@ -116,6 +116,36 @@ asset ingest --src <origen> --dest <destino> --db <base-de-datos>
 - `--src` / `-s`, `--dest` / `-d`, `--dry-run`, `--min-free`, `--remove-source`, `--error-dir`, `--password`: igual que en `process`.
 - `--db`: ruta de la base de datos (o variable de entorno `ASSET_DB`).
 
+### `vault`
+
+Gestiona bóvedas (bases de datos con nombre).
+El registro de bóvedas vive en el directorio de configuración del sistema
+(`~/.config/asset/vaults.json` en Linux).
+
+```bash
+asset vault create fotos          # crea y registra una bóveda
+asset vault use fotos             # la fija como bóveda actual
+asset vault list                  # lista bóvedas (la actual con *)
+asset vault current               # muestra la bóveda actual
+asset vault path fotos            # imprime su ruta
+asset vault delete fotos --files  # desregistra y borra sus archivos
+```
+
+- `vault create <nombre> [--path <dir>]`: crea la BD y la registra. Sin `--path`,
+  usa `<config>/asset/vaults/<nombre>/assets.db`.
+- `vault delete <nombre> [--yes] [--files]`: desregistra; con `--files` borra
+  también la base de datos y sus archivos auxiliares.
+
+Cuando no se pasa `--db`, `scan` e `ingest` usan la **bóveda actual** (o `ASSET_DB` si está definida).
+
+### `scan` y `db`
+
+```bash
+asset scan -d <directorio>        # indexa un árbol en la base de datos
+asset db info                     # estado de la base de datos
+asset db migrations               # lista las migraciones aplicadas
+```
+
 ## Flags globales
 
 Disponibles en todos los subcomandos:

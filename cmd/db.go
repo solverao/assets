@@ -90,8 +90,9 @@ func newDBMigrateCmd() *cobra.Command {
 
 func newDBListCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "list",
-		Short: "Lista las migraciones aplicadas",
+		Use:     "migrations",
+		Aliases: []string{"list"},
+		Short:   "Lista las migraciones aplicadas",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			versions, err := database.ListMigrations(dbPath)
 			if err != nil {

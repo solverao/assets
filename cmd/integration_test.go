@@ -94,3 +94,49 @@ func TestIngestProcessesAndIndexes(t *testing.T) {
 		t.Fatalf("se esperaba 1 asset indexado, got %d", count)
 	}
 }
+
+func TestIngestIncludesLooseFiles(t *testing.T) {
+	src := t.TempDir()
+	sub := filepath.Join(src, "paquetes")
+	if err := os.MkdirAll(sub, 0755); err != nil {
+		t.Fatal(err)
+	}
+	makeZip(t, filepath.Join(sub, "Demo.zip"), map[string]string{"Demo/f.txt": "hola"})
+	if err := os.WriteFile(filepath.Join(sub, "nota.txt"), []byte("suelto"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	dest := t.TempDir()
+	dbPath := filepath.Join(t.TempDir(), "assets.db")
+
+	if err := runIngest(context.Background(),
+		extract.NewExtractorService(),
+		normalize.NewNormalizerService(),
+		checksum.NewChecksumService(),
+		src, dest, dbPath, 0, false, "", "", false); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := os.Stat(filepath.Join(dest, "paquetes", "nota.txt")); err != nil {
+		t.Fatalf("suelto no copiado: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dest, "paquetes", "demo", "f.txt")); err != nil {
+		t.Fatalf("extraído no encontrado: %v", err)
+	}
+
+	db, err := database.InitDB(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	for _, slug := range []string{"nota.txt", "f.txt"} {
+		var n int
+		if err := db.QueryRow(`SELECT COUNT(*) FROM assets WHERE type='file' AND slug=?`, slug).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		if n != 1 {
+			t.Fatalf("slug %q no indexado (got %d)", slug, n)
+		}
+	}
+}

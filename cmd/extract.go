@@ -16,6 +16,7 @@ func NewExtractCmd(extractor *extract.ExtractorService) *cobra.Command {
 	var removeSource bool
 	var errorDir string
 	var password string
+	var includeFiles bool
 
 	cmd := &cobra.Command{
 		Use:   "extract",
@@ -33,6 +34,7 @@ func NewExtractCmd(extractor *extract.ExtractorService) *cobra.Command {
 				RemoveSource: removeSource,
 				ErrorDir:     resolveErrorDir(destDir, errorDir),
 				Password:     password,
+				IncludeFiles: includeFiles,
 			})
 		},
 	}
@@ -44,6 +46,7 @@ func NewExtractCmd(extractor *extract.ExtractorService) *cobra.Command {
 	cmd.Flags().BoolVar(&removeSource, "remove-source", false, "Borra cada comprimido del origen tras extraerlo con éxito")
 	cmd.Flags().StringVar(&errorDir, "error-dir", "", "Directorio de cuarentena para los que fallan (por defecto, .errores junto a dest)")
 	cmd.Flags().StringVar(&password, "password", "", "Contraseña para archivos cifrados (RAR y 7z)")
+	cmd.Flags().BoolVar(&includeFiles, "include-files", false, "Copia también los archivos que no son comprimidos")
 
 	cmd.MarkFlagRequired("src")
 	cmd.MarkFlagRequired("dest")
