@@ -9,7 +9,6 @@ import (
 
 func NewScanCmd() *cobra.Command {
 	var scanDir string
-	var dbPath string
 
 	cmd := &cobra.Command{
 		Use:   "scan",
@@ -27,7 +26,6 @@ func NewScanCmd() *cobra.Command {
 	}
 
 	cmd.Flags().StringVarP(&scanDir, "dir", "d", "", "Directorio a escanear (requerido)")
-	cmd.Flags().StringVar(&dbPath, "db", "assets.db", "Ruta de la base de datos SQLite")
 	cmd.MarkFlagRequired("dir")
 
 	return cmd

@@ -2,8 +2,10 @@ package cmd
 
 import (
 	"asset/internal/checksum"
+	"asset/internal/database"
 	"asset/internal/extract"
 	"asset/internal/normalize"
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -22,7 +24,7 @@ func TestIntegrationPipeline(t *testing.T) {
 		"Proyecto Demo/archivo Uno.txt": "contenido",
 	})
 
-	if err := extract.NewExtractorService().ExtractAll(src, dest, 2, false, 0); err != nil {
+	if err := extract.NewExtractorService().ExtractAll(src, dest, 2, false, 0, false, ""); err != nil {
 		t.Fatal(err)
 	}
 	if err := normalize.NewNormalizerService().NormalizeAll(dest, false); err != nil {
@@ -47,5 +49,46 @@ func TestIntegrationPipeline(t *testing.T) {
 	}
 	if !strings.Contains(string(cs), "proyecto-demo/archivo-uno.txt") {
 		t.Fatalf("checksums.txt no contiene la ruta esperada: %q", cs)
+	}
+}
+
+func TestIngestProcessesAndIndexes(t *testing.T) {
+	src := t.TempDir()
+	sub := filepath.Join(src, "paquetes")
+	if err := os.MkdirAll(sub, 0755); err != nil {
+		t.Fatal(err)
+	}
+	makeZip(t, filepath.Join(sub, "Proyecto Demo.zip"), map[string]string{
+		"Proyecto Demo/archivo Uno.txt": "contenido",
+	})
+
+	dest := t.TempDir()
+	dbPath := filepath.Join(t.TempDir(), "assets.db")
+
+	if err := runIngest(context.Background(),
+		extract.NewExtractorService(),
+		normalize.NewNormalizerService(),
+		checksum.NewChecksumService(),
+		src, dest, dbPath, 0, false, "", false); err != nil {
+		t.Fatal(err)
+	}
+
+	final := filepath.Join(dest, "paquetes", "proyecto-demo", "archivo-uno.txt")
+	if _, err := os.Stat(final); err != nil {
+		t.Fatalf("archivo final no encontrado: %v", err)
+	}
+
+	db, err := database.InitDB(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	var count int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM assets WHERE type='file' AND slug='archivo-uno.txt'`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("se esperaba 1 asset indexado, got %d", count)
 	}
 }

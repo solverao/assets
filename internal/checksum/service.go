@@ -149,3 +149,24 @@ func CalculateChecksum(path string) (string, error) {
 	}
 	return hex.EncodeToString(hash.Sum(nil)), nil
 }
+
+// PartialHeadBytes es el tamaño de la cabecera que se hashea para el
+// dedup rápido de blobs. Combinado con el tamaño del archivo, permite
+// descartar duplicados sin leer el archivo completo.
+const PartialHeadBytes = 1 << 20 // 1 MiB
+
+// PartialChecksum devuelve el SHA-256 de las primeras PartialHeadBytes del
+// archivo, usado como firma rápida para deduplicación masiva.
+func PartialChecksum(path string) (string, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer file.Close()
+
+	hash := sha256.New()
+	if _, err := io.CopyN(hash, file, PartialHeadBytes); err != nil && err != io.EOF {
+		return "", err
+	}
+	return hex.EncodeToString(hash.Sum(nil)), nil
+}

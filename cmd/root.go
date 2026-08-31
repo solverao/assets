@@ -3,6 +3,7 @@ package cmd
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"runtime"
 
 	"asset/internal/checksum"
@@ -19,6 +20,7 @@ var (
 	verbose    bool
 	workers    int
 	syncWrites bool
+	dbPath     string
 )
 
 var rootCmd = &cobra.Command{
@@ -32,12 +34,31 @@ func init() {
 	rootCmd.PersistentFlags().BoolVarP(&verbose, "verbose", "v", false, "Mostrar información de depuración")
 	rootCmd.PersistentFlags().IntVarP(&workers, "workers", "w", 0, "Número de workers concurrentes (0 = auto)")
 	rootCmd.PersistentFlags().BoolVar(&syncWrites, "sync", true, "Sincronizar escrituras a disco (fsync) para mayor durabilidad")
+	rootCmd.PersistentFlags().StringVar(&dbPath, "db", defaultDBPath(), "Ruta de la base de datos SQLite")
 
 	rootCmd.AddCommand(NewExtractCmd(extract.NewExtractorService()))
 	rootCmd.AddCommand(NewNormalizeCmd(normalize.NewNormalizerService()))
 	rootCmd.AddCommand(NewChecksumCmd(checksum.NewChecksumService()))
-	rootCmd.AddCommand(NewPipelineCmd(normalize.NewNormalizerService(), checksum.NewChecksumService()))
+	rootCmd.AddCommand(NewProcessCmd(extract.NewExtractorService(), normalize.NewNormalizerService(), checksum.NewChecksumService()))
+	rootCmd.AddCommand(NewIngestCmd(extract.NewExtractorService(), normalize.NewNormalizerService(), checksum.NewChecksumService()))
 	rootCmd.AddCommand(NewScanCmd())
+	rootCmd.AddCommand(NewDBCmd())
+}
+
+func defaultDBPath() string {
+	if p := os.Getenv("ASSET_DB"); p != "" {
+		return p
+	}
+	return "assets.db"
+}
+
+// resolveErrorDir devuelve el directorio de cuarentena de errores. Si flagVal
+// está vacío, usa un directorio oculto .errores junto a dest.
+func resolveErrorDir(dest, flagVal string) string {
+	if flagVal != "" {
+		return flagVal
+	}
+	return filepath.Join(filepath.Dir(dest), ".errores")
 }
 
 func Execute() {

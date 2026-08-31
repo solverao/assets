@@ -4,14 +4,18 @@ import (
 	"archive/tar"
 	"archive/zip"
 	"compress/gzip"
+	"errors"
 	"fmt"
 	"io"
 	"log"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/bodgit/sevenzip"
@@ -32,6 +36,8 @@ type ExtractResult struct {
 type extractJob struct {
 	path   string
 	relDir string
+	folder string
+	kind   string
 }
 
 func NewExtractorService() *ExtractorService {
@@ -40,9 +46,12 @@ func NewExtractorService() *ExtractorService {
 
 // ExtractAll es el equivalente a tu RunExtractionLogic.
 // workers <= 0 activa la detección automática según el tipo de disco (HDD/SSD).
-// sync controla si se hace fsync de archivos y directorios.
+// doSync controla si se hace fsync de archivos y directorios.
 // minFree es el espacio libre mínimo requerido en dest (bytes).
-func (s *ExtractorService) ExtractAll(src string, dest string, workers int, doSync bool, minFree int64) error {
+// removeSource borra cada comprimido (y sus partes) del origen tras extraerlo con éxito.
+// errorDir, si no está vacío, es la cuarentena: ahí se mueven los que fallan y se
+// escribe un manifiesto errores.txt con el motivo.
+func (s *ExtractorService) ExtractAll(src string, dest string, workers int, doSync bool, minFree int64, removeSource bool, errorDir string) error {
 	fmt.Printf("Buscando comprimidos en: %s\n", src)
 	if err := os.MkdirAll(dest, os.ModePerm); err != nil {
 		return fmt.Errorf("error creando directorio destino: %w", err)
@@ -52,8 +61,33 @@ func (s *ExtractorService) ExtractAll(src string, dest string, workers int, doSy
 		return err
 	}
 
-	jobs := make(chan extractJob, 100)
-	results := make(chan ExtractResult, 100)
+	// Recoge primero la lista de trabajos para poder borrar el origen con
+	// seguridad tras procesar (evita borrar durante el WalkDir).
+	var jobs []extractJob
+	err := filepath.WalkDir(src, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			return nil
+		}
+		kind, folder, isCont, ok := classifyArchive(path)
+		if !ok || isCont {
+			return nil
+		}
+		relDir, relErr := filepath.Rel(src, filepath.Dir(path))
+		if relErr != nil {
+			relDir = filepath.Dir(path)
+		}
+		jobs = append(jobs, extractJob{path: path, relDir: relDir, folder: folder, kind: kind})
+		return nil
+	})
+	if err != nil {
+		return fmt.Errorf("error leyendo origen: %w", err)
+	}
+
+	jobsCh := make(chan extractJob, len(jobs))
+	results := make(chan ExtractResult, len(jobs))
 	var wg sync.WaitGroup
 	var drainer sync.WaitGroup
 
@@ -61,49 +95,50 @@ func (s *ExtractorService) ExtractAll(src string, dest string, workers int, doSy
 
 	for w := 1; w <= nw; w++ {
 		wg.Add(1)
-		go extractWorker(jobs, results, &wg, dest, doSync)
+		go extractWorker(jobsCh, results, &wg, dest, doSync, removeSource, errorDir)
 	}
 
 	drainer.Add(1)
 
 	go func() {
 		defer drainer.Done()
+		var manifest *os.File
 		for res := range results {
-			if res.Err != nil {
-				fmt.Printf("[ERROR] %s: %v\n", filepath.Base(res.Source), res.Err)
+			if res.Err == nil {
+				continue
 			}
+			fmt.Printf("[ERROR] %s: %v\n", filepath.Base(res.Source), res.Err)
+			if errorDir == "" {
+				continue
+			}
+			if manifest == nil {
+				if err := os.MkdirAll(errorDir, os.ModePerm); err != nil {
+					warnf("No se pudo crear el directorio de errores: %v", err)
+					continue
+				}
+				f, err := os.OpenFile(filepath.Join(errorDir, "errores.txt"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
+				if err != nil {
+					warnf("No se pudo escribir el manifiesto de errores: %v", err)
+					continue
+				}
+				manifest = f
+			}
+			rel, _ := filepath.Rel(src, res.Source)
+			fmt.Fprintf(manifest, "%s\t%v\n", rel, res.Err)
+		}
+		if manifest != nil {
+			manifest.Close()
 		}
 	}()
 
-	count := 0
-	err := filepath.WalkDir(src, func(path string, d os.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if !d.IsDir() && detectArchiveType(path) != "" {
-			relDir, relErr := filepath.Rel(src, filepath.Dir(path))
-			if relErr != nil {
-				relDir = filepath.Dir(path)
-			}
-			jobs <- extractJob{path: path, relDir: relDir}
-			count++
-		}
-		return nil
-	})
-
-	if err != nil {
-		close(jobs)
-		wg.Wait()
-		close(results)
-		drainer.Wait()
-		return fmt.Errorf("error leyendo origen: %w", err)
+	for _, j := range jobs {
+		jobsCh <- j
 	}
-
-	close(jobs)
+	close(jobsCh)
 	wg.Wait()
 	close(results)
 	drainer.Wait()
-	fmt.Printf("Extracción completada. %d archivos procesados.\n", count)
+	fmt.Printf("Extracción completada. %d archivos procesados.\n", len(jobs))
 
 	return nil
 }
@@ -178,48 +213,81 @@ func isRotational(dir string) (bool, error) {
 // detectArchiveType devuelve "zip", "targz", "rar" o "7z" según la
 // extensión del archivo, o "" si no es un formato soportado.
 func detectArchiveType(path string) string {
-	lower := strings.ToLower(path)
-	if strings.HasSuffix(lower, ".tar.gz") {
-		return "targz"
+	kind, _, _, ok := classifyArchive(path)
+	if !ok {
+		return ""
 	}
-	switch strings.ToLower(filepath.Ext(path)) {
-	case ".zip":
-		return "zip"
-	case ".tgz":
-		return "targz"
-	case ".rar":
-		return "rar"
-	case ".7z":
-		return "7z"
-	}
-	return ""
+	return kind
 }
 
-func extractWorker(jobs <-chan extractJob, results chan<- ExtractResult, wg *sync.WaitGroup, dest string, doSync bool) {
+var (
+	rarSplitRe    = regexp.MustCompile(`(?i)^(.*)\.part(\d+)\.rar$`)
+	sevenzSplitRe = regexp.MustCompile(`(?i)^(.*)\.7z\.(\d+)$`)
+)
+
+// classifyArchive clasifica un archivo como comprimido. Devuelve el tipo, el
+// nombre base (para la carpeta de destino), si es una parte de continuación
+// de un comprimido multiparte, y si el formato es soportado.
+func classifyArchive(path string) (kind, base string, isContinuation bool, ok bool) {
+	name := filepath.Base(path)
+
+	// Multiparte RAR: nombre.partN.rar (N>1 son continuaciones).
+	if m := rarSplitRe.FindStringSubmatch(name); m != nil {
+		n, _ := strconv.Atoi(m[2])
+		return "rar", m[1], n > 1, true
+	}
+	// Multiparte 7z: nombre.7z.NNN (NNN>001 son continuaciones).
+	if m := sevenzSplitRe.FindStringSubmatch(name); m != nil {
+		n, _ := strconv.Atoi(m[2])
+		return "7z", m[1], n > 1, true
+	}
+
+	if strings.HasSuffix(strings.ToLower(name), ".tar.gz") {
+		return "targz", trimSuffixFold(name, ".tar.gz"), false, true
+	}
+
+	switch strings.ToLower(filepath.Ext(name)) {
+	case ".zip":
+		return "zip", trimSuffixFold(name, ".zip"), false, true
+	case ".tgz":
+		return "targz", trimSuffixFold(name, ".tgz"), false, true
+	case ".rar":
+		return "rar", trimSuffixFold(name, ".rar"), false, true
+	case ".7z":
+		return "7z", trimSuffixFold(name, ".7z"), false, true
+	}
+	return "", "", false, false
+}
+
+// trimSuffixFold elimina suffix de s (sin distinguir mayúsculas).
+func trimSuffixFold(s, suffix string) string {
+	if strings.HasSuffix(strings.ToLower(s), strings.ToLower(suffix)) {
+		return s[:len(s)-len(suffix)]
+	}
+	return s
+}
+
+func extractWorker(jobs <-chan extractJob, results chan<- ExtractResult, wg *sync.WaitGroup, dest string, doSync bool, removeSource bool, errorDir string) {
 	defer wg.Done()
 
 	for job := range jobs {
-		var err error
-
-		baseName := filepath.Base(job.path)
-		folderName := strings.TrimSuffix(baseName, filepath.Ext(baseName))
-
-		if strings.ToLower(filepath.Ext(folderName)) == ".tar" {
-			folderName = strings.TrimSuffix(folderName, filepath.Ext(folderName))
-		}
-
-		archiveDest := filepath.Join(dest, job.relDir, folderName)
+		archiveDest := filepath.Join(dest, job.relDir, job.folder)
 		debugf("Extrayendo %s -> %s", job.path, archiveDest)
 
-		switch detectArchiveType(job.path) {
+		var err error
+		var volumes []string
+
+		switch job.kind {
 		case "zip":
 			err = extractZip(job.path, archiveDest, doSync)
+			volumes = []string{job.path}
 		case "targz":
 			err = extractTarGz(job.path, archiveDest, doSync)
+			volumes = []string{job.path}
 		case "rar":
-			err = extractRar(job.path, archiveDest, doSync)
+			volumes, err = extractRar(job.path, archiveDest, doSync)
 		case "7z":
-			err = extract7z(job.path, archiveDest, doSync)
+			volumes, err = extract7z(job.path, archiveDest, doSync)
 		default:
 			err = fmt.Errorf("formato no soportado")
 		}
@@ -229,16 +297,117 @@ func extractWorker(jobs <-chan extractJob, results chan<- ExtractResult, wg *syn
 			if rmErr := os.RemoveAll(archiveDest); rmErr != nil {
 				debugf("No se pudo limpiar %s: %v", archiveDest, rmErr)
 			}
+			if errorDir != "" {
+				if qErr := quarantineArchive(job, errorDir); qErr != nil {
+					warnf("No se pudo mover a cuarentena %s: %v", job.path, qErr)
+				}
+			}
 		} else {
 			// Si la extracción fue exitosa, aplicamos la Extracción Inteligente
 			if flattenErr := flattenSingleDirectory(archiveDest, doSync); flattenErr != nil {
 				// Si falla el aplanamiento lo registramos, pero no detenemos todo
-				warnf("No se pudo aplanar %s: %v", folderName, flattenErr)
+				warnf("No se pudo aplanar %s: %v", job.folder, flattenErr)
+			}
+			if removeSource {
+				for _, v := range volumes {
+					if rmErr := os.Remove(v); rmErr != nil && !os.IsNotExist(rmErr) {
+						warnf("No se pudo borrar %s: %v", v, rmErr)
+					}
+				}
 			}
 		}
 
 		results <- ExtractResult{Source: job.path, Err: err}
 	}
+}
+
+// quarantineArchive mueve el comprimido fallido (y sus partes hermanas, en
+// multiparte) al directorio de cuarentena, conservando la subestructura.
+func quarantineArchive(job extractJob, errorDir string) error {
+	set := splitSiblings(filepath.Dir(job.path), job.folder, job.kind)
+	if len(set) == 0 {
+		set = []string{job.path}
+	}
+
+	destDir := filepath.Join(errorDir, job.relDir)
+	for _, p := range set {
+		if err := moveFileQuarantine(p, filepath.Join(destDir, filepath.Base(p))); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// splitSiblings devuelve las partes de un set multiparte presentes en dir que
+// comparten el nombre base, o nil si no es un set multiparte.
+func splitSiblings(dir, base, kind string) []string {
+	var re *regexp.Regexp
+	switch kind {
+	case "rar":
+		re = rarSplitRe
+	case "7z":
+		re = sevenzSplitRe
+	default:
+		return nil
+	}
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil
+	}
+
+	var parts []string
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		if m := re.FindStringSubmatch(e.Name()); m != nil && m[1] == base {
+			parts = append(parts, filepath.Join(dir, e.Name()))
+		}
+	}
+	return parts
+}
+
+// moveFileQuarantine mueve src a dst creando directorios padre y con
+// fallback de copia+borrado si src y dst están en distintos dispositivos.
+func moveFileQuarantine(src, dst string) error {
+	if err := os.MkdirAll(filepath.Dir(dst), os.ModePerm); err != nil {
+		return err
+	}
+	if err := os.Rename(src, dst); err != nil {
+		if errors.Is(err, syscall.EXDEV) {
+			return copyAndRemoveFile(src, dst)
+		}
+		return err
+	}
+	return nil
+}
+
+func copyAndRemoveFile(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+
+	info, err := in.Stat()
+	if err != nil {
+		return err
+	}
+
+	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, info.Mode())
+	if err != nil {
+		return err
+	}
+
+	if _, err := io.Copy(out, in); err != nil {
+		out.Close()
+		return err
+	}
+	if err := out.Close(); err != nil {
+		return err
+	}
+	return os.Remove(src)
 }
 
 // maxExtractedFileSize limita el tamaño descomprimido por archivo para
@@ -483,10 +652,10 @@ func extractTarGz(src, dest string, doSync bool) error {
 	return nil
 }
 
-func extractRar(src, dest string, doSync bool) error {
+func extractRar(src, dest string, doSync bool) ([]string, error) {
 	rr, err := rardecode.OpenReader(src, "")
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer rr.Close()
 	for {
@@ -495,15 +664,15 @@ func extractRar(src, dest string, doSync bool) error {
 			break
 		}
 		if err != nil {
-			return err
+			return nil, err
 		}
 		path := filepath.Join(dest, header.Name)
 		if !strings.HasPrefix(path, filepath.Clean(dest)+string(os.PathSeparator)) {
-			return fmt.Errorf("zipslip: %s", header.Name)
+			return nil, fmt.Errorf("zipslip: %s", header.Name)
 		}
 		if header.IsDir {
 			if err := mkdirAllNoSymlink(dest, path, 0755); err != nil {
-				return err
+				return nil, err
 			}
 			if doSync {
 				syncDir(filepath.Dir(path))
@@ -515,41 +684,41 @@ func extractRar(src, dest string, doSync bool) error {
 			continue
 		}
 		if err := mkdirAllNoSymlink(dest, filepath.Dir(path), 0755); err != nil {
-			return err
+			return nil, err
 		}
 		dstFile, err := openFileNoFollow(path, sanitizeMode(header.Mode()))
 		if err != nil {
-			return err
+			return nil, err
 		}
 		if err := copyLimited(dstFile, rr); err != nil {
 			dstFile.Close()
-			return err
+			return nil, err
 		}
 		if err := closeFile(dstFile, doSync); err != nil {
-			return err
+			return nil, err
 		}
 		if doSync {
 			syncDir(filepath.Dir(path))
 		}
 		setFileTimes(path, header.ModificationTime)
 	}
-	return nil
+	return rr.Volumes(), nil
 }
 
-func extract7z(src, dest string, doSync bool) error {
+func extract7z(src, dest string, doSync bool) ([]string, error) {
 	r, err := sevenzip.OpenReader(src)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer r.Close()
 	for _, f := range r.File {
 		path := filepath.Join(dest, f.Name)
 		if !strings.HasPrefix(path, filepath.Clean(dest)+string(os.PathSeparator)) {
-			return fmt.Errorf("zipslip: %s", f.Name)
+			return nil, fmt.Errorf("zipslip: %s", f.Name)
 		}
 		if f.FileInfo().IsDir() {
 			if err := mkdirAllNoSymlink(dest, path, 0755); err != nil {
-				return err
+				return nil, err
 			}
 			if doSync {
 				syncDir(filepath.Dir(path))
@@ -561,32 +730,32 @@ func extract7z(src, dest string, doSync bool) error {
 			continue
 		}
 		if err := mkdirAllNoSymlink(dest, filepath.Dir(path), 0755); err != nil {
-			return err
+			return nil, err
 		}
 		dstFile, err := openFileNoFollow(path, sanitizeMode(f.Mode()))
 		if err != nil {
-			return err
+			return nil, err
 		}
 		srcFile, err := f.Open()
 		if err != nil {
 			dstFile.Close()
-			return err
+			return nil, err
 		}
 		err = copyLimited(dstFile, srcFile)
 		srcFile.Close()
 		if err != nil {
 			dstFile.Close()
-			return err
+			return nil, err
 		}
 		if err := closeFile(dstFile, doSync); err != nil {
-			return err
+			return nil, err
 		}
 		if doSync {
 			syncDir(filepath.Dir(path))
 		}
 		setFileTimes(path, f.Modified)
 	}
-	return nil
+	return r.Volumes(), nil
 }
 
 // flattenSingleDirectory revisa si una carpeta contiene una sola subcarpeta.

@@ -12,10 +12,17 @@ y el proyecto sigue [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Subcomando `extract` para extraer `.zip`, `.tar.gz`, `.tgz`, `.rar` y `.7z` de forma concurrente.
 - Subcomando `normalize` para renombrar archivos y carpetas a *slugs*.
 - Subcomando `checksum` que genera `checksums.txt` con SHA-256.
-- Subcomando `pipeline` que encadena `Extract -> Normalize -> Checksum -> Move`.
-- Flags globales `--verbose` y `--workers`.
-- Flag `--dry-run` en `normalize` y `pipeline`.
+- Subcomando `process` que encadena `Extract -> Normalize -> Checksum -> Move`.
+- Subcomando `ingest` que ejecuta `process` e indexa el resultado en la base de datos.
+- Subcomando `scan` que indexa un árbol de archivos en SQLite.
+- Subcomando `db` para gestionar la base de datos (`init`, `info`, `migrate`, `list`, `delete`).
+- Flags globales `--verbose`, `--workers`, `--sync` y `--db` (o variable `ASSET_DB`).
+- Flag `--dry-run` en `normalize`, `process` e `ingest`.
 - Flag `--output` en `checksum`.
+- Flag `--min-free` en `extract`, `process` e `ingest`.
+- Flag `--remove-source` en `extract`, `process` e `ingest`.
+- Flag `--error-dir` (cuarentena) y manifiesto `errores.txt` para archivos corruptos o incompletos.
+- Soporte de comprimidos multiparte RAR (`.part1.rar`) y 7z (`.7z.001`).
 - Protección contra zip-slip y symlinks, y límite de tamaño por archivo descomprimido.
 
 ### Corregido

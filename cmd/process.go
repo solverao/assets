@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"asset/internal/checksum"
+	"asset/internal/extract"
 	"asset/internal/normalize"
 	"context"
 	"errors"
@@ -15,45 +16,56 @@ import (
 	"github.com/spf13/cobra"
 )
 
-func NewPipelineCmd(normalizer *normalize.NormalizerService, checksummer *checksum.ChecksumService) *cobra.Command {
-	var pipeSrc string
-	var pipeDest string
-	var pipeDryRun bool
+func NewProcessCmd(extractor *extract.ExtractorService, normalizer *normalize.NormalizerService, checksummer *checksum.ChecksumService) *cobra.Command {
+	var procSrc string
+	var procDest string
+	var procDryRun bool
+	var procMinFree int64
+	var procRemoveSource bool
+	var procErrorDir string
 
 	cmd := &cobra.Command{
-		Use:   "pipeline",
-		Short: "Ejecuta Extract -> Normalize -> Checksum -> Move",
+		Use:   "process",
+		Short: "Procesa archivos (Extract -> Normalize -> Checksum -> Move)",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runPipeline(cmd.Context(), normalizer, checksummer, pipeSrc, pipeDest, pipeDryRun)
+			return runProcess(cmd.Context(), extractor, normalizer, checksummer, procSrc, procDest, procMinFree, procRemoveSource, resolveErrorDir(procDest, procErrorDir), procDryRun)
 		},
 	}
 
-	cmd.Flags().StringVarP(&pipeSrc, "src", "s", "", "Directorio origen")
-	cmd.Flags().StringVarP(&pipeDest, "dest", "d", "", "Directorio destino final")
-	cmd.Flags().BoolVar(&pipeDryRun, "dry-run", false, "Mostrar los movimientos sin aplicarlos")
+	cmd.Flags().StringVarP(&procSrc, "src", "s", "", "Directorio origen")
+	cmd.Flags().StringVarP(&procDest, "dest", "d", "", "Directorio destino final")
+	cmd.Flags().BoolVar(&procDryRun, "dry-run", false, "Mostrar los movimientos sin aplicarlos")
+	cmd.Flags().Int64Var(&procMinFree, "min-free", 1<<30, "Espacio libre mínimo requerido en destino (bytes)")
+	cmd.Flags().BoolVar(&procRemoveSource, "remove-source", false, "Borra cada comprimido del origen tras extraerlo con éxito")
+	cmd.Flags().StringVar(&procErrorDir, "error-dir", "", "Directorio de cuarentena para los que fallan (por defecto, .errores junto a dest)")
 	cmd.MarkFlagRequired("src")
 	cmd.MarkFlagRequired("dest")
 
 	return cmd
 }
 
-func runPipeline(ctx context.Context, normalizer *normalize.NormalizerService, checksummer *checksum.ChecksumService, src, dest string, dryRun bool) error {
+func runProcess(ctx context.Context, extractor *extract.ExtractorService, normalizer *normalize.NormalizerService, checksummer *checksum.ChecksumService, src, dest string, minFree int64, removeSource bool, errorDir string, dryRun bool) error {
 	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	fmt.Println("=== Iniciando Pipeline de Procesamiento ===")
+	fmt.Println("=== Procesamiento de archivos ===")
 
-	tmpDir, err := os.MkdirTemp("", "miapp-workspace-*")
+	// Temporal en el mismo filesystem que dest para evitar copia cross-device.
+	destDir := filepath.Dir(dest)
+	if err := os.MkdirAll(destDir, os.ModePerm); err != nil {
+		return fmt.Errorf("error creando directorio de destino: %w", err)
+	}
+	tmpDir, err := os.MkdirTemp(destDir, ".asset-tmp-*")
 	if err != nil {
 		return fmt.Errorf("error creando temporal: %w", err)
 	}
 	defer os.RemoveAll(tmpDir)
 	fmt.Printf("[1/5] Temporal creado: %s\n", tmpDir)
 
-	// fmt.Println("\n[2/5] Extrayendo archivos...")
-	// if err := RunExtractionLogic(src, tmpDir); err != nil {
-	// 	return fmt.Errorf("fallo en extracción: %w", err)
-	// }
+	fmt.Println("\n[2/5] Extrayendo archivos...")
+	if err := extractor.ExtractAll(src, tmpDir, numWorkers(), syncWrites, minFree, removeSource, errorDir); err != nil {
+		return fmt.Errorf("fallo en extracción: %w", err)
+	}
 
 	fmt.Println("\n[3/5] Normalizando nombres...")
 	if err := normalizer.NormalizeAll(tmpDir, false); err != nil {
@@ -112,7 +124,7 @@ func walkAndMove(ctx context.Context, tmpDir, dest string, dryRun bool) error {
 	if err != nil {
 		return fmt.Errorf("error en traslado final: %w", err)
 	}
-	fmt.Printf("\n=== Pipeline completado. %d archivos movidos. ===\n", movedCount)
+	fmt.Printf("\n=== Procesamiento completado. %d archivos movidos. ===\n", movedCount)
 	return nil
 }
 

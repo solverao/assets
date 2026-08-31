@@ -31,8 +31,10 @@ asset extract -s <origen> -d <destino>
 
 - `--src` / `-s`: directorio origen (obligatorio).
 - `--dest` / `-d`: directorio destino (obligatorio).
+- `--remove-source`: borra cada comprimido del origen tras extraerlo con éxito.
+- `--error-dir`: directorio de cuarentena para los que fallan (por defecto `.errores` junto a `dest`); se escribe un `errores.txt` con el motivo.
 
-Formatos soportados: `.zip`, `.tar.gz`, `.tgz`, `.rar`, `.7z`.
+Formatos soportados: `.zip`, `.tar.gz`, `.tgz`, `.rar`, `.7z` (incluidos los multiparte `.part1.rar` y `.7z.001`).
 
 Comportamiento:
 
@@ -78,27 +80,43 @@ El archivo se crea dentro del directorio procesado, con una entrada por línea:
 <sha256>  <ruta/relativa>
 ```
 
-### `pipeline`
+### `process`
 
-Encadena todo el flujo: `Extract -> Normalize -> Checksum -> Move`.
+Procesa el flujo completo de archivos: `Extract -> Normalize -> Checksum -> Move`.
 
 ```bash
-asset pipeline --src <origen> --dest <destino>
-asset pipeline -s <origen> -d <destino>
+asset process --src <origen> --dest <destino>
+asset process -s <origen> -d <destino>
 ```
 
 - `--src` / `-s`: directorio origen (obligatorio).
 - `--dest` / `-d`: directorio destino final (obligatorio).
 - `--dry-run`: muestra los movimientos sin aplicarlos.
+- `--min-free`: espacio libre mínimo en destino (bytes, por defecto 1 GiB).
+- `--remove-source`: borra cada comprimido del origen tras extraerlo con éxito.
+- `--error-dir`: directorio de cuarentena para los que fallan (por defecto `.errores` junto a `dest`).
 
 El trabajo se realiza en un directorio temporal y, al final, los archivos (incluido `checksums.txt`) se mueven al destino. El traslado usa `rename` y, si el origen y el destino están en distintos dispositivos, copia y elimina.
+
+### `ingest`
+
+Ejecuta `process` y después indexa el resultado en la base de datos SQLite.
+
+```bash
+asset ingest --src <origen> --dest <destino> --db <base-de-datos>
+```
+
+- `--src` / `-s`, `--dest` / `-d`, `--dry-run`, `--min-free`, `--remove-source`, `--error-dir`: igual que en `process`.
+- `--db`: ruta de la base de datos (o variable de entorno `ASSET_DB`).
 
 ## Flags globales
 
 Disponibles en todos los subcomandos:
 
 - `--verbose` / `-v`: muestra información de depuración.
-- `--workers` / `-w`: número de workers concurrentes (por defecto, el número de CPUs).
+- `--workers` / `-w`: número de workers concurrentes (0 = auto).
+- `--sync`: sincroniza las escrituras a disco con fsync (por defecto activado).
+- `--db`: ruta de la base de datos SQLite (o variable de entorno `ASSET_DB`).
 - `--version`: muestra la versión.
 
 ## Completions de shell
@@ -124,7 +142,10 @@ asset normalize -d ./extraido
 asset checksum -d ./extraido
 
 # O todo de una vez
-asset pipeline -s ./entrada -d ./salida
+asset process -s ./entrada -d ./salida
+
+# Procesar e indexar en la base de datos
+asset ingest -s ./entrada -d ./salida --db ./assets.db
 ```
 
 ## Verificación
@@ -147,10 +168,10 @@ make cover
 
 ## Desarrollo
 
-La lógica de cada subcomando vive en funciones exportadas dentro de `cmd/`
-(`RunExtractionLogic`, `RunNormalizationLogic`, `RunChecksumLogic`), de modo que
-`pipeline` las reutiliza. Para añadir un subcomando, sigue ese patrón: un wrapper
-delgado de `cobra` (`RunE`) que delega en una función `Run...Logic` exportada.
+La lógica de cada subcomando vive en servicios exportados dentro de `internal/`
+(`extract.ExtractorService`, `normalize.NormalizerService`, `checksum.ChecksumService`),
+de modo que `process` e `ingest` los reutilizan. Para añadir un subcomando, sigue ese
+patrón: un wrapper delgado de `cobra` (`RunE`) que delega en el servicio correspondiente.
 
 La versión se inyecta en el binario con:
 

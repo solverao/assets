@@ -1,6 +1,7 @@
 package database
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -59,5 +60,45 @@ func TestSplitSQL(t *testing.T) {
 	}
 	if len(stmts) != 2 {
 		t.Fatalf("se esperaban 2 statements, got %d", len(stmts))
+	}
+}
+
+func TestSplitSQLTrigger(t *testing.T) {
+	content := "CREATE TRIGGER t AFTER INSERT ON x BEGIN\n\tINSERT INTO f(a) VALUES (';');\n\tINSERT INTO f(a) VALUES (2);\nEND;\n"
+	stmts, err := splitSQL(content)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(stmts) != 1 {
+		t.Fatalf("se esperaba 1 statement, got %d", len(stmts))
+	}
+	if !strings.Contains(stmts[0], "END;") {
+		t.Fatalf("el trigger debería conservar su END;: %q", stmts[0])
+	}
+}
+
+func TestSplitSQLBlockCommentAndString(t *testing.T) {
+	content := "/* bloque ; con ; */\nCREATE TABLE a (v text DEFAULT ';');\n"
+	stmts, err := splitSQL(content)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(stmts) != 1 {
+		t.Fatalf("se esperaba 1 statement, got %d", len(stmts))
+	}
+}
+
+func TestMigrateDetectsDrift(t *testing.T) {
+	db, err := InitDB(":memory:")
+	if err != nil {
+		t.Fatalf("InitDB: %v", err)
+	}
+	defer db.Close()
+
+	if _, err := db.Exec(`UPDATE schema_migrations SET checksum = 'bogus'`); err != nil {
+		t.Fatal(err)
+	}
+	if err := Migrate(db); err == nil {
+		t.Fatal("se esperaba error por drift de migración")
 	}
 }

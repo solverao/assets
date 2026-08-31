@@ -6,6 +6,7 @@ import (
 	"compress/gzip"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -130,7 +131,7 @@ func TestExtractAllPreservesSubdirs(t *testing.T) {
 	makeZip(t, filepath.Join(src, "b", "foo.zip"), map[string]string{"x.txt": "b"})
 
 	dest := t.TempDir()
-	if err := NewExtractorService().ExtractAll(src, dest, 2, false, 0); err != nil {
+	if err := NewExtractorService().ExtractAll(src, dest, 2, false, 0, false, ""); err != nil {
 		t.Fatal(err)
 	}
 
@@ -210,7 +211,7 @@ func TestExtractAllCleansPartialOnError(t *testing.T) {
 	})
 
 	dest := t.TempDir()
-	if err := NewExtractorService().ExtractAll(src, dest, 1, false, 0); err != nil {
+	if err := NewExtractorService().ExtractAll(src, dest, 1, false, 0, false, ""); err != nil {
 		t.Fatal(err)
 	}
 
@@ -267,5 +268,168 @@ func TestCheckFreeSpace(t *testing.T) {
 	}
 	if err := checkFreeSpace(dest, int64(1)<<60); err == nil {
 		t.Fatal("se esperaba error por espacio insuficiente")
+	}
+}
+
+func TestClassifyArchive(t *testing.T) {
+	cases := []struct {
+		path           string
+		kind           string
+		base           string
+		isContinuation bool
+		ok             bool
+	}{
+		{"a.zip", "zip", "a", false, true},
+		{"a.tar.gz", "targz", "a", false, true},
+		{"a.tgz", "targz", "a", false, true},
+		{"a.rar", "rar", "a", false, true},
+		{"a.7z", "7z", "a", false, true},
+		{"A.ZIP", "zip", "A", false, true},
+		{"a.part1.rar", "rar", "a", false, true},
+		{"a.part01.rar", "rar", "a", false, true},
+		{"a.part2.rar", "rar", "a", true, true},
+		{"a.7z.001", "7z", "a", false, true},
+		{"a.7z.002", "7z", "a", true, true},
+		{"a.gz", "", "", false, false},
+		{"a.txt", "", "", false, false},
+		{"a.tar", "", "", false, false},
+		{"sin-ext", "", "", false, false},
+	}
+	for _, c := range cases {
+		kind, base, isCont, ok := classifyArchive(c.path)
+		if kind != c.kind || base != c.base || isCont != c.isContinuation || ok != c.ok {
+			t.Errorf("classifyArchive(%q) = (%q, %q, %v, %v), want (%q, %q, %v, %v)",
+				c.path, kind, base, isCont, ok, c.kind, c.base, c.isContinuation, c.ok)
+		}
+	}
+}
+
+func TestExtractAllRemoveSource(t *testing.T) {
+	src := t.TempDir()
+	zipPath := filepath.Join(src, "foo.zip")
+	makeZip(t, zipPath, map[string]string{"x.txt": "a"})
+
+	dest := t.TempDir()
+	if err := NewExtractorService().ExtractAll(src, dest, 1, false, 0, true, ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(zipPath); !os.IsNotExist(err) {
+		t.Fatalf("el origen debería haberse borrado: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dest, "foo", "x.txt")); err != nil {
+		t.Fatalf("extracción no encontrada: %v", err)
+	}
+}
+
+func TestExtractAllKeepsSourceOnFailure(t *testing.T) {
+	src := t.TempDir()
+	bad := filepath.Join(src, "bad.zip")
+	if err := os.WriteFile(bad, []byte("not a zip"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	dest := t.TempDir()
+	if err := NewExtractorService().ExtractAll(src, dest, 1, false, 0, true, ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(bad); err != nil {
+		t.Fatalf("el origen no debería borrarse si falla: %v", err)
+	}
+}
+
+func TestExtractAllSkipsContinuationParts(t *testing.T) {
+	src := t.TempDir()
+	makeZip(t, filepath.Join(src, "foo.zip"), map[string]string{"x.txt": "a"})
+	if err := os.WriteFile(filepath.Join(src, "bar.part1.rar"), []byte("dummy"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(src, "bar.part2.rar"), []byte("dummy"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	dest := t.TempDir()
+	if err := NewExtractorService().ExtractAll(src, dest, 2, false, 0, false, ""); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := os.Stat(filepath.Join(dest, "foo", "x.txt")); err != nil {
+		t.Fatalf("foo no extraído: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dest, "bar")); !os.IsNotExist(err) {
+		t.Fatalf("no debería existir carpeta para bar (parte fallida/continuación): %v", err)
+	}
+}
+
+func TestExtractAllQuarantineOnError(t *testing.T) {
+	src := t.TempDir()
+	bad := filepath.Join(src, "sub", "bad.zip")
+	if err := os.MkdirAll(filepath.Dir(bad), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(bad, []byte("not a zip"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	dest := t.TempDir()
+	errorDir := filepath.Join(t.TempDir(), "errores")
+
+	if err := NewExtractorService().ExtractAll(src, dest, 1, false, 0, false, errorDir); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := os.Stat(filepath.Join(errorDir, "sub", "bad.zip")); err != nil {
+		t.Fatalf("el archivo corrupto no se movió a cuarentena: %v", err)
+	}
+	if _, err := os.Stat(bad); !os.IsNotExist(err) {
+		t.Fatalf("el original debería haberse movido: %v", err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(errorDir, "errores.txt"))
+	if err != nil {
+		t.Fatalf("manifiesto no encontrado: %v", err)
+	}
+	if !strings.Contains(string(data), "bad.zip") {
+		t.Fatalf("manifiesto no contiene bad.zip: %q", data)
+	}
+}
+
+func TestExtractAllNoErrorDirOnSuccess(t *testing.T) {
+	src := t.TempDir()
+	makeZip(t, filepath.Join(src, "foo.zip"), map[string]string{"x.txt": "a"})
+
+	dest := t.TempDir()
+	errorDir := filepath.Join(t.TempDir(), "errores")
+
+	if err := NewExtractorService().ExtractAll(src, dest, 1, false, 0, false, errorDir); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(errorDir); !os.IsNotExist(err) {
+		t.Fatalf("no debería crearse cuarentena si no hay errores: %v", err)
+	}
+}
+
+func TestExtractAllQuarantineMultipart(t *testing.T) {
+	src := t.TempDir()
+	if err := os.WriteFile(filepath.Join(src, "set.part1.rar"), []byte("dummy"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(src, "set.part2.rar"), []byte("dummy"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	dest := t.TempDir()
+	errorDir := filepath.Join(t.TempDir(), "errores")
+
+	if err := NewExtractorService().ExtractAll(src, dest, 1, false, 0, false, errorDir); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, p := range []string{"set.part1.rar", "set.part2.rar"} {
+		if _, err := os.Stat(filepath.Join(errorDir, p)); err != nil {
+			t.Fatalf("%s no se movió a cuarentena: %v", p, err)
+		}
+		if _, err := os.Stat(filepath.Join(src, p)); !os.IsNotExist(err) {
+			t.Fatalf("%s debería haberse movido del origen: %v", p, err)
+		}
 	}
 }
