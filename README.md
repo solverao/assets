@@ -6,6 +6,10 @@ CLI para la gestión masiva de archivos: extraer comprimidos, normalizar nombres
 
 - Go 1.25 o superior.
 
+El proyecto no usa cgo: el driver de SQLite es `modernc.org/sqlite` (pure Go) y la
+búsqueda full-text usa FTS5, por lo que el binario compila de forma cruzada
+(`GOOS=windows go build ./...`, `GOOS=darwin go build ./...`) sin toolchain de C.
+
 ## Instalación
 
 ```bash
@@ -33,6 +37,7 @@ asset extract -s <origen> -d <destino>
 - `--dest` / `-d`: directorio destino (obligatorio).
 - `--remove-source`: borra cada comprimido del origen tras extraerlo con éxito.
 - `--error-dir`: directorio de cuarentena para los que fallan (por defecto `.errores` junto a `dest`); se escribe un `errores.txt` con el motivo.
+- `--password`: contraseña para archivos cifrados (RAR y 7z).
 
 Formatos soportados: `.zip`, `.tar.gz`, `.tgz`, `.rar`, `.7z` (incluidos los multiparte `.part1.rar` y `.7z.001`).
 
@@ -95,6 +100,7 @@ asset process -s <origen> -d <destino>
 - `--min-free`: espacio libre mínimo en destino (bytes, por defecto 1 GiB).
 - `--remove-source`: borra cada comprimido del origen tras extraerlo con éxito.
 - `--error-dir`: directorio de cuarentena para los que fallan (por defecto `.errores` junto a `dest`).
+- `--password`: contraseña para archivos cifrados (RAR y 7z).
 
 El trabajo se realiza en un directorio temporal y, al final, los archivos (incluido `checksums.txt`) se mueven al destino. El traslado usa `rename` y, si el origen y el destino están en distintos dispositivos, copia y elimina.
 
@@ -106,7 +112,7 @@ Ejecuta `process` y después indexa el resultado en la base de datos SQLite.
 asset ingest --src <origen> --dest <destino> --db <base-de-datos>
 ```
 
-- `--src` / `-s`, `--dest` / `-d`, `--dry-run`, `--min-free`, `--remove-source`, `--error-dir`: igual que en `process`.
+- `--src` / `-s`, `--dest` / `-d`, `--dry-run`, `--min-free`, `--remove-source`, `--error-dir`, `--password`: igual que en `process`.
 - `--db`: ruta de la base de datos (o variable de entorno `ASSET_DB`).
 
 ## Flags globales

@@ -23,12 +23,13 @@ func NewProcessCmd(extractor *extract.ExtractorService, normalizer *normalize.No
 	var procMinFree int64
 	var procRemoveSource bool
 	var procErrorDir string
+	var procPassword string
 
 	cmd := &cobra.Command{
 		Use:   "process",
 		Short: "Procesa archivos (Extract -> Normalize -> Checksum -> Move)",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runProcess(cmd.Context(), extractor, normalizer, checksummer, procSrc, procDest, procMinFree, procRemoveSource, resolveErrorDir(procDest, procErrorDir), procDryRun)
+			return runProcess(cmd.Context(), extractor, normalizer, checksummer, procSrc, procDest, procMinFree, procRemoveSource, resolveErrorDir(procDest, procErrorDir), procPassword, procDryRun)
 		},
 	}
 
@@ -38,13 +39,14 @@ func NewProcessCmd(extractor *extract.ExtractorService, normalizer *normalize.No
 	cmd.Flags().Int64Var(&procMinFree, "min-free", 1<<30, "Espacio libre mínimo requerido en destino (bytes)")
 	cmd.Flags().BoolVar(&procRemoveSource, "remove-source", false, "Borra cada comprimido del origen tras extraerlo con éxito")
 	cmd.Flags().StringVar(&procErrorDir, "error-dir", "", "Directorio de cuarentena para los que fallan (por defecto, .errores junto a dest)")
+	cmd.Flags().StringVar(&procPassword, "password", "", "Contraseña para archivos cifrados (RAR y 7z)")
 	cmd.MarkFlagRequired("src")
 	cmd.MarkFlagRequired("dest")
 
 	return cmd
 }
 
-func runProcess(ctx context.Context, extractor *extract.ExtractorService, normalizer *normalize.NormalizerService, checksummer *checksum.ChecksumService, src, dest string, minFree int64, removeSource bool, errorDir string, dryRun bool) error {
+func runProcess(ctx context.Context, extractor *extract.ExtractorService, normalizer *normalize.NormalizerService, checksummer *checksum.ChecksumService, src, dest string, minFree int64, removeSource bool, errorDir string, password string, dryRun bool) error {
 	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
@@ -63,7 +65,16 @@ func runProcess(ctx context.Context, extractor *extract.ExtractorService, normal
 	fmt.Printf("[1/5] Temporal creado: %s\n", tmpDir)
 
 	fmt.Println("\n[2/5] Extrayendo archivos...")
-	if err := extractor.ExtractAll(src, tmpDir, numWorkers(), syncWrites, minFree, removeSource, errorDir); err != nil {
+	if err := extractor.ExtractAll(ctx, extract.ExtractOptions{
+		Src:          src,
+		Dest:         tmpDir,
+		Workers:      numWorkers(),
+		Sync:         syncWrites,
+		MinFree:      minFree,
+		RemoveSource: removeSource,
+		ErrorDir:     errorDir,
+		Password:     password,
+	}); err != nil {
 		return fmt.Errorf("fallo en extracción: %w", err)
 	}
 

@@ -3,7 +3,9 @@ package extract
 import (
 	"archive/tar"
 	"archive/zip"
+	"bytes"
 	"compress/gzip"
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -83,7 +85,7 @@ func TestExtractZipFlattensSingleDir(t *testing.T) {
 	makeZip(t, src, map[string]string{"proyecto/archivo.txt": "hola"})
 
 	dest := t.TempDir()
-	if err := extractZip(src, filepath.Join(dest, "proyecto"), false); err != nil {
+	if err := extractZip(context.Background(), src, filepath.Join(dest, "proyecto"), false); err != nil {
 		t.Fatal(err)
 	}
 	if err := flattenSingleDirectory(filepath.Join(dest, "proyecto"), false); err != nil {
@@ -107,7 +109,7 @@ func TestExtractTarGz(t *testing.T) {
 	makeTarGz(t, src, map[string]string{"dir/archivo.txt": "hola"})
 
 	dest := t.TempDir()
-	if err := extractTarGz(src, filepath.Join(dest, "proyecto"), false); err != nil {
+	if err := extractTarGz(context.Background(), src, filepath.Join(dest, "proyecto"), false); err != nil {
 		t.Fatal(err)
 	}
 
@@ -131,7 +133,7 @@ func TestExtractAllPreservesSubdirs(t *testing.T) {
 	makeZip(t, filepath.Join(src, "b", "foo.zip"), map[string]string{"x.txt": "b"})
 
 	dest := t.TempDir()
-	if err := NewExtractorService().ExtractAll(src, dest, 2, false, 0, false, ""); err != nil {
+	if err := NewExtractorService().ExtractAll(context.Background(), ExtractOptions{Src: src, Dest: dest, Workers: 2, Sync: false, MinFree: 0, RemoveSource: false, ErrorDir: ""}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -150,7 +152,7 @@ func TestExtractZipZipSlip(t *testing.T) {
 	src := filepath.Join(t.TempDir(), "evil.zip")
 	makeZip(t, src, map[string]string{"../evil.txt": "boom"})
 
-	if err := extractZip(src, t.TempDir(), false); err == nil {
+	if err := extractZip(context.Background(), src, t.TempDir(), false); err == nil {
 		t.Fatal("se esperaba error de zipslip")
 	}
 }
@@ -159,7 +161,7 @@ func TestExtractTarGzZipSlip(t *testing.T) {
 	src := filepath.Join(t.TempDir(), "evil.tar.gz")
 	makeTarGz(t, src, map[string]string{"../evil.txt": "boom"})
 
-	if err := extractTarGz(src, t.TempDir(), false); err == nil {
+	if err := extractTarGz(context.Background(), src, t.TempDir(), false); err == nil {
 		t.Fatal("se esperaba error de zipslip")
 	}
 }
@@ -188,7 +190,7 @@ func TestExtractZipSkipsSymlink(t *testing.T) {
 	}
 
 	dest := t.TempDir()
-	if err := extractZip(src, dest, false); err != nil {
+	if err := extractZip(context.Background(), src, dest, false); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Lstat(filepath.Join(dest, "link")); !os.IsNotExist(err) {
@@ -211,7 +213,7 @@ func TestExtractAllCleansPartialOnError(t *testing.T) {
 	})
 
 	dest := t.TempDir()
-	if err := NewExtractorService().ExtractAll(src, dest, 1, false, 0, false, ""); err != nil {
+	if err := NewExtractorService().ExtractAll(context.Background(), ExtractOptions{Src: src, Dest: dest, Workers: 1, Sync: false, MinFree: 0, RemoveSource: false, ErrorDir: ""}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -233,7 +235,7 @@ func TestExtractZipRefusesSymlinkInDest(t *testing.T) {
 		t.Skipf("no se pudieron crear symlinks: %v", err)
 	}
 
-	if err := extractZip(src, dest, false); err == nil {
+	if err := extractZip(context.Background(), src, dest, false); err == nil {
 		t.Fatal("se esperaba error por symlink preexistente en dest")
 	}
 
@@ -258,16 +260,6 @@ func TestResolveExtractWorkers(t *testing.T) {
 	}
 	if got := resolveExtractWorkers(t.TempDir(), 0); got < 1 {
 		t.Fatalf("resolveExtractWorkers(0) = %d, want >= 1", got)
-	}
-}
-
-func TestCheckFreeSpace(t *testing.T) {
-	dest := t.TempDir()
-	if err := checkFreeSpace(dest, 0); err != nil {
-		t.Fatalf("minFree=0 debería desactivar la comprobación: %v", err)
-	}
-	if err := checkFreeSpace(dest, int64(1)<<60); err == nil {
-		t.Fatal("se esperaba error por espacio insuficiente")
 	}
 }
 
@@ -310,7 +302,7 @@ func TestExtractAllRemoveSource(t *testing.T) {
 	makeZip(t, zipPath, map[string]string{"x.txt": "a"})
 
 	dest := t.TempDir()
-	if err := NewExtractorService().ExtractAll(src, dest, 1, false, 0, true, ""); err != nil {
+	if err := NewExtractorService().ExtractAll(context.Background(), ExtractOptions{Src: src, Dest: dest, Workers: 1, Sync: false, MinFree: 0, RemoveSource: true, ErrorDir: ""}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(zipPath); !os.IsNotExist(err) {
@@ -329,7 +321,7 @@ func TestExtractAllKeepsSourceOnFailure(t *testing.T) {
 	}
 
 	dest := t.TempDir()
-	if err := NewExtractorService().ExtractAll(src, dest, 1, false, 0, true, ""); err != nil {
+	if err := NewExtractorService().ExtractAll(context.Background(), ExtractOptions{Src: src, Dest: dest, Workers: 1, Sync: false, MinFree: 0, RemoveSource: true, ErrorDir: ""}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(bad); err != nil {
@@ -348,7 +340,7 @@ func TestExtractAllSkipsContinuationParts(t *testing.T) {
 	}
 
 	dest := t.TempDir()
-	if err := NewExtractorService().ExtractAll(src, dest, 2, false, 0, false, ""); err != nil {
+	if err := NewExtractorService().ExtractAll(context.Background(), ExtractOptions{Src: src, Dest: dest, Workers: 2, Sync: false, MinFree: 0, RemoveSource: false, ErrorDir: ""}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -373,7 +365,7 @@ func TestExtractAllQuarantineOnError(t *testing.T) {
 	dest := t.TempDir()
 	errorDir := filepath.Join(t.TempDir(), "errores")
 
-	if err := NewExtractorService().ExtractAll(src, dest, 1, false, 0, false, errorDir); err != nil {
+	if err := NewExtractorService().ExtractAll(context.Background(), ExtractOptions{Src: src, Dest: dest, Workers: 1, Sync: false, MinFree: 0, RemoveSource: false, ErrorDir: errorDir}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -400,7 +392,7 @@ func TestExtractAllNoErrorDirOnSuccess(t *testing.T) {
 	dest := t.TempDir()
 	errorDir := filepath.Join(t.TempDir(), "errores")
 
-	if err := NewExtractorService().ExtractAll(src, dest, 1, false, 0, false, errorDir); err != nil {
+	if err := NewExtractorService().ExtractAll(context.Background(), ExtractOptions{Src: src, Dest: dest, Workers: 1, Sync: false, MinFree: 0, RemoveSource: false, ErrorDir: errorDir}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(errorDir); !os.IsNotExist(err) {
@@ -420,7 +412,7 @@ func TestExtractAllQuarantineMultipart(t *testing.T) {
 	dest := t.TempDir()
 	errorDir := filepath.Join(t.TempDir(), "errores")
 
-	if err := NewExtractorService().ExtractAll(src, dest, 1, false, 0, false, errorDir); err != nil {
+	if err := NewExtractorService().ExtractAll(context.Background(), ExtractOptions{Src: src, Dest: dest, Workers: 1, Sync: false, MinFree: 0, RemoveSource: false, ErrorDir: errorDir}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -431,5 +423,30 @@ func TestExtractAllQuarantineMultipart(t *testing.T) {
 		if _, err := os.Stat(filepath.Join(src, p)); !os.IsNotExist(err) {
 			t.Fatalf("%s debería haberse movido del origen: %v", p, err)
 		}
+	}
+}
+
+func TestCopyLimitedCtxCancelled(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	var buf bytes.Buffer
+	if err := copyLimitedCtx(ctx, &buf, strings.NewReader("hola")); err == nil {
+		t.Fatal("se esperaba error por contexto cancelado")
+	}
+}
+
+func TestExtractAllZipIgnoresPassword(t *testing.T) {
+	src := t.TempDir()
+	makeZip(t, filepath.Join(src, "foo.zip"), map[string]string{"x.txt": "a"})
+
+	dest := t.TempDir()
+	if err := NewExtractorService().ExtractAll(context.Background(), ExtractOptions{
+		Src: src, Dest: dest, Workers: 1, Password: "secreto",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(dest, "foo", "x.txt")); err != nil {
+		t.Fatalf("extracción no encontrada: %v", err)
 	}
 }

@@ -19,12 +19,13 @@ func NewIngestCmd(extractor *extract.ExtractorService, normalizer *normalize.Nor
 	var ingMinFree int64
 	var ingRemoveSource bool
 	var ingErrorDir string
+	var ingPassword string
 
 	cmd := &cobra.Command{
 		Use:   "ingest",
 		Short: "Ingiere archivos (procesa y indexa en la base de datos)",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runIngest(cmd.Context(), extractor, normalizer, checksummer, ingSrc, ingDest, dbPath, ingMinFree, ingRemoveSource, resolveErrorDir(ingDest, ingErrorDir), ingDryRun)
+			return runIngest(cmd.Context(), extractor, normalizer, checksummer, ingSrc, ingDest, dbPath, ingMinFree, ingRemoveSource, resolveErrorDir(ingDest, ingErrorDir), ingPassword, ingDryRun)
 		},
 	}
 
@@ -34,14 +35,15 @@ func NewIngestCmd(extractor *extract.ExtractorService, normalizer *normalize.Nor
 	cmd.Flags().Int64Var(&ingMinFree, "min-free", 1<<30, "Espacio libre mínimo requerido en destino (bytes)")
 	cmd.Flags().BoolVar(&ingRemoveSource, "remove-source", false, "Borra cada comprimido del origen tras extraerlo con éxito")
 	cmd.Flags().StringVar(&ingErrorDir, "error-dir", "", "Directorio de cuarentena para los que fallan (por defecto, .errores junto a dest)")
+	cmd.Flags().StringVar(&ingPassword, "password", "", "Contraseña para archivos cifrados (RAR y 7z)")
 	cmd.MarkFlagRequired("src")
 	cmd.MarkFlagRequired("dest")
 
 	return cmd
 }
 
-func runIngest(ctx context.Context, extractor *extract.ExtractorService, normalizer *normalize.NormalizerService, checksummer *checksum.ChecksumService, src, dest, dbPath string, minFree int64, removeSource bool, errorDir string, dryRun bool) error {
-	if err := runProcess(ctx, extractor, normalizer, checksummer, src, dest, minFree, removeSource, errorDir, dryRun); err != nil {
+func runIngest(ctx context.Context, extractor *extract.ExtractorService, normalizer *normalize.NormalizerService, checksummer *checksum.ChecksumService, src, dest, dbPath string, minFree int64, removeSource bool, errorDir string, password string, dryRun bool) error {
+	if err := runProcess(ctx, extractor, normalizer, checksummer, src, dest, minFree, removeSource, errorDir, password, dryRun); err != nil {
 		return err
 	}
 

@@ -4,6 +4,7 @@ import (
 	"archive/tar"
 	"archive/zip"
 	"compress/gzip"
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -20,12 +21,23 @@ import (
 
 	"github.com/bodgit/sevenzip"
 	"github.com/nwaples/rardecode"
-	"golang.org/x/sys/unix"
 )
 
 // ExtractorService encapsula la lógica de descompresión
 type ExtractorService struct {
 	// Aquí podrías inyectar un Logger si lo necesitaras en el futuro
+}
+
+// ExtractOptions configura una extracción masiva.
+type ExtractOptions struct {
+	Src          string
+	Dest         string
+	Workers      int
+	Sync         bool
+	MinFree      int64
+	RemoveSource bool
+	ErrorDir     string
+	Password     string
 }
 
 type ExtractResult struct {
@@ -44,14 +56,21 @@ func NewExtractorService() *ExtractorService {
 	return &ExtractorService{}
 }
 
-// ExtractAll es el equivalente a tu RunExtractionLogic.
-// workers <= 0 activa la detección automática según el tipo de disco (HDD/SSD).
-// doSync controla si se hace fsync de archivos y directorios.
-// minFree es el espacio libre mínimo requerido en dest (bytes).
-// removeSource borra cada comprimido (y sus partes) del origen tras extraerlo con éxito.
-// errorDir, si no está vacío, es la cuarentena: ahí se mueven los que fallan y se
-// escribe un manifiesto errores.txt con el motivo.
-func (s *ExtractorService) ExtractAll(src string, dest string, workers int, doSync bool, minFree int64, removeSource bool, errorDir string) error {
+// ExtractAll extrae todos los comprimidos de opts.Src hacia opts.Dest.
+// Respeta la cancelación vía ctx (nil equivale a context.Background()).
+func (s *ExtractorService) ExtractAll(ctx context.Context, opts ExtractOptions) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	src := opts.Src
+	dest := opts.Dest
+	workers := opts.Workers
+	doSync := opts.Sync
+	minFree := opts.MinFree
+	removeSource := opts.RemoveSource
+	errorDir := opts.ErrorDir
+	password := opts.Password
+
 	fmt.Printf("Buscando comprimidos en: %s\n", src)
 	if err := os.MkdirAll(dest, os.ModePerm); err != nil {
 		return fmt.Errorf("error creando directorio destino: %w", err)
@@ -95,7 +114,7 @@ func (s *ExtractorService) ExtractAll(src string, dest string, workers int, doSy
 
 	for w := 1; w <= nw; w++ {
 		wg.Add(1)
-		go extractWorker(jobsCh, results, &wg, dest, doSync, removeSource, errorDir)
+		go extractWorker(ctx, jobsCh, results, &wg, dest, doSync, removeSource, errorDir, password)
 	}
 
 	drainer.Add(1)
@@ -131,31 +150,27 @@ func (s *ExtractorService) ExtractAll(src string, dest string, workers int, doSy
 		}
 	}()
 
+	cancelled := false
 	for _, j := range jobs {
-		jobsCh <- j
+		select {
+		case jobsCh <- j:
+		case <-ctx.Done():
+			cancelled = true
+		}
+		if cancelled {
+			break
+		}
 	}
 	close(jobsCh)
 	wg.Wait()
 	close(results)
 	drainer.Wait()
+
+	if cancelled {
+		return ctx.Err()
+	}
 	fmt.Printf("Extracción completada. %d archivos procesados.\n", len(jobs))
 
-	return nil
-}
-
-// checkFreeSpace aborta si el espacio libre en dest queda por debajo de minFree.
-func checkFreeSpace(dest string, minFree int64) error {
-	if minFree <= 0 {
-		return nil
-	}
-	var st unix.Statfs_t
-	if err := unix.Statfs(dest, &st); err != nil {
-		return fmt.Errorf("no se pudo comprobar el espacio libre: %w", err)
-	}
-	free := int64(st.Bavail) * int64(st.Bsize)
-	if free < minFree {
-		return fmt.Errorf("espacio libre insuficiente en %s: %d bytes disponibles (< %d requeridos)", dest, free, minFree)
-	}
 	return nil
 }
 
@@ -176,38 +191,6 @@ func resolveExtractWorkers(dest string, workers int) int {
 		return 2
 	}
 	return runtime.NumCPU()
-}
-
-// isRotational indica si el dispositivo que aloja dir es rotacional (HDD)
-// leyendo /sys/dev/block/<major>:<minor>/queue/rotational.
-func isRotational(dir string) (bool, error) {
-	var st unix.Stat_t
-	if err := unix.Stat(dir, &st); err != nil {
-		return false, err
-	}
-	link := fmt.Sprintf("/sys/dev/block/%d:%d", unix.Major(st.Dev), unix.Minor(st.Dev))
-	target, err := os.Readlink(link)
-	if err != nil {
-		return false, err
-	}
-	abs := target
-	if !filepath.IsAbs(abs) {
-		abs = filepath.Join(filepath.Dir(link), target)
-	}
-	// Las particiones viven bajo el dispositivo de bloque; subimos hasta
-	// encontrar el directorio que contiene queue/rotational.
-	for i := 0; i < 8; i++ {
-		rot := filepath.Join(abs, "queue", "rotational")
-		if data, err := os.ReadFile(rot); err == nil {
-			return strings.TrimSpace(string(data)) == "1", nil
-		}
-		parent := filepath.Dir(abs)
-		if parent == abs {
-			break
-		}
-		abs = parent
-	}
-	return false, fmt.Errorf("no se pudo determinar si %s es rotacional", dir)
 }
 
 // detectArchiveType devuelve "zip", "targz", "rar" o "7z" según la
@@ -267,10 +250,14 @@ func trimSuffixFold(s, suffix string) string {
 	return s
 }
 
-func extractWorker(jobs <-chan extractJob, results chan<- ExtractResult, wg *sync.WaitGroup, dest string, doSync bool, removeSource bool, errorDir string) {
+func extractWorker(ctx context.Context, jobs <-chan extractJob, results chan<- ExtractResult, wg *sync.WaitGroup, dest string, doSync bool, removeSource bool, errorDir string, password string) {
 	defer wg.Done()
 
 	for job := range jobs {
+		if ctx.Err() != nil {
+			continue
+		}
+
 		archiveDest := filepath.Join(dest, job.relDir, job.folder)
 		debugf("Extrayendo %s -> %s", job.path, archiveDest)
 
@@ -279,15 +266,15 @@ func extractWorker(jobs <-chan extractJob, results chan<- ExtractResult, wg *syn
 
 		switch job.kind {
 		case "zip":
-			err = extractZip(job.path, archiveDest, doSync)
+			err = extractZip(ctx, job.path, archiveDest, doSync)
 			volumes = []string{job.path}
 		case "targz":
-			err = extractTarGz(job.path, archiveDest, doSync)
+			err = extractTarGz(ctx, job.path, archiveDest, doSync)
 			volumes = []string{job.path}
 		case "rar":
-			volumes, err = extractRar(job.path, archiveDest, doSync)
+			volumes, err = extractRar(ctx, job.path, archiveDest, doSync, password)
 		case "7z":
-			volumes, err = extract7z(job.path, archiveDest, doSync)
+			volumes, err = extract7z(ctx, job.path, archiveDest, doSync, password)
 		default:
 			err = fmt.Errorf("formato no soportado")
 		}
@@ -430,10 +417,25 @@ func (l *limitedWriter) Write(p []byte) (int, error) {
 	return n, err
 }
 
-// copyLimited copia src a dst deteniéndose con error si se supera max bytes.
-func copyLimited(dst io.Writer, src io.Reader) error {
+// ctxReader devuelve ctx.Err() antes de cada lectura, permitiendo cancelar
+// copias largas.
+type ctxReader struct {
+	ctx context.Context
+	r   io.Reader
+}
+
+func (c *ctxReader) Read(p []byte) (int, error) {
+	if err := c.ctx.Err(); err != nil {
+		return 0, err
+	}
+	return c.r.Read(p)
+}
+
+// copyLimitedCtx copia src a dst deteniéndose con error si se supera max bytes
+// o si ctx se cancela.
+func copyLimitedCtx(ctx context.Context, dst io.Writer, src io.Reader) error {
 	lw := &limitedWriter{w: dst, max: maxExtractedFileSize}
-	_, err := io.Copy(lw, src)
+	_, err := io.Copy(lw, &ctxReader{ctx: ctx, r: src})
 	return err
 }
 
@@ -450,16 +452,6 @@ func setFileTimes(path string, mtime time.Time) {
 // sanitizeMode elimina bits peligrosos (setuid/setgid/sticky) del modo.
 func sanitizeMode(mode os.FileMode) os.FileMode {
 	return mode.Perm()
-}
-
-// openFileNoFollow crea el archivo de salida sin seguir symlinks (O_NOFOLLOW)
-// para evitar que un symlink preexistente en dest redirija la escritura.
-func openFileNoFollow(path string, mode os.FileMode) (*os.File, error) {
-	fd, err := unix.Open(path, unix.O_WRONLY|unix.O_CREAT|unix.O_TRUNC|unix.O_NOFOLLOW, uint32(mode.Perm()))
-	if err != nil {
-		return nil, err
-	}
-	return os.NewFile(uintptr(fd), path), nil
 }
 
 // closeFile sincroniza (fsync) y cierra el archivo si se solicita durabilidad.
@@ -533,21 +525,24 @@ func mkdirAllNoSymlink(root, path string, perm os.FileMode) error {
 	return nil
 }
 
-func extractZip(src, dest string, doSync bool) error {
+func extractZip(ctx context.Context, src, dest string, doSync bool) error {
 	r, err := zip.OpenReader(src)
 	if err != nil {
 		return err
 	}
 	defer r.Close()
 	for _, f := range r.File {
-		if err := extractZipFile(f, dest, doSync); err != nil {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if err := extractZipFile(ctx, f, dest, doSync); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func extractZipFile(f *zip.File, dest string, doSync bool) error {
+func extractZipFile(ctx context.Context, f *zip.File, dest string, doSync bool) error {
 	path := filepath.Join(dest, f.Name)
 	if !strings.HasPrefix(path, filepath.Clean(dest)+string(os.PathSeparator)) {
 		return fmt.Errorf("zipslip: %s", f.Name)
@@ -577,7 +572,7 @@ func extractZipFile(f *zip.File, dest string, doSync bool) error {
 		dstFile.Close()
 		return err
 	}
-	if err := copyLimited(dstFile, srcFile); err != nil {
+	if err := copyLimitedCtx(ctx, dstFile, srcFile); err != nil {
 		srcFile.Close()
 		dstFile.Close()
 		return err
@@ -593,7 +588,7 @@ func extractZipFile(f *zip.File, dest string, doSync bool) error {
 	return nil
 }
 
-func extractTarGz(src, dest string, doSync bool) error {
+func extractTarGz(ctx context.Context, src, dest string, doSync bool) error {
 	file, err := os.Open(src)
 	if err != nil {
 		return err
@@ -606,6 +601,9 @@ func extractTarGz(src, dest string, doSync bool) error {
 	defer gzr.Close()
 	tr := tar.NewReader(gzr)
 	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		header, err := tr.Next()
 		if err == io.EOF {
 			break
@@ -636,7 +634,7 @@ func extractTarGz(src, dest string, doSync bool) error {
 			if err != nil {
 				return err
 			}
-			if err := copyLimited(dstFile, tr); err != nil {
+			if err := copyLimitedCtx(ctx, dstFile, tr); err != nil {
 				dstFile.Close()
 				return err
 			}
@@ -652,13 +650,16 @@ func extractTarGz(src, dest string, doSync bool) error {
 	return nil
 }
 
-func extractRar(src, dest string, doSync bool) ([]string, error) {
-	rr, err := rardecode.OpenReader(src, "")
+func extractRar(ctx context.Context, src, dest string, doSync bool, password string) ([]string, error) {
+	rr, err := rardecode.OpenReader(src, password)
 	if err != nil {
 		return nil, err
 	}
 	defer rr.Close()
 	for {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		header, err := rr.Next()
 		if err == io.EOF {
 			break
@@ -690,7 +691,7 @@ func extractRar(src, dest string, doSync bool) ([]string, error) {
 		if err != nil {
 			return nil, err
 		}
-		if err := copyLimited(dstFile, rr); err != nil {
+		if err := copyLimitedCtx(ctx, dstFile, rr); err != nil {
 			dstFile.Close()
 			return nil, err
 		}
@@ -705,13 +706,16 @@ func extractRar(src, dest string, doSync bool) ([]string, error) {
 	return rr.Volumes(), nil
 }
 
-func extract7z(src, dest string, doSync bool) ([]string, error) {
-	r, err := sevenzip.OpenReader(src)
+func extract7z(ctx context.Context, src, dest string, doSync bool, password string) ([]string, error) {
+	r, err := sevenzip.OpenReaderWithPassword(src, password)
 	if err != nil {
 		return nil, err
 	}
 	defer r.Close()
 	for _, f := range r.File {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		path := filepath.Join(dest, f.Name)
 		if !strings.HasPrefix(path, filepath.Clean(dest)+string(os.PathSeparator)) {
 			return nil, fmt.Errorf("zipslip: %s", f.Name)
@@ -741,7 +745,7 @@ func extract7z(src, dest string, doSync bool) ([]string, error) {
 			dstFile.Close()
 			return nil, err
 		}
-		err = copyLimited(dstFile, srcFile)
+		err = copyLimitedCtx(ctx, dstFile, srcFile)
 		srcFile.Close()
 		if err != nil {
 			dstFile.Close()

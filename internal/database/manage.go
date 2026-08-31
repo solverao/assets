@@ -96,8 +96,7 @@ func Delete(path string) error {
 
 // openRaw abre la base de datos sin ejecutar migraciones.
 func openRaw(path string) (*sql.DB, error) {
-	dsn := fmt.Sprintf("file:%s?_fk=1&_busy_timeout=5000", path)
-	db, err := sql.Open("sqlite3", dsn)
+	db, err := sql.Open("sqlite", "file:"+path+"?_pragma=foreign_keys(1)&_pragma=busy_timeout(5000)")
 	if err != nil {
 		return nil, err
 	}

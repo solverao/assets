@@ -1,6 +1,10 @@
 package cmd
 
 import (
+	"os"
+	"os/signal"
+	"syscall"
+
 	"asset/internal/extract"
 
 	"github.com/spf13/cobra"
@@ -11,12 +15,25 @@ func NewExtractCmd(extractor *extract.ExtractorService) *cobra.Command {
 	var minFree int64
 	var removeSource bool
 	var errorDir string
+	var password string
 
 	cmd := &cobra.Command{
 		Use:   "extract",
 		Short: "Extrae archivos comprimidos masivamente",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return extractor.ExtractAll(srcDir, destDir, workers, syncWrites, minFree, removeSource, resolveErrorDir(destDir, errorDir))
+			ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
+			defer stop()
+
+			return extractor.ExtractAll(ctx, extract.ExtractOptions{
+				Src:          srcDir,
+				Dest:         destDir,
+				Workers:      workers,
+				Sync:         syncWrites,
+				MinFree:      minFree,
+				RemoveSource: removeSource,
+				ErrorDir:     resolveErrorDir(destDir, errorDir),
+				Password:     password,
+			})
 		},
 	}
 
@@ -26,6 +43,7 @@ func NewExtractCmd(extractor *extract.ExtractorService) *cobra.Command {
 	cmd.Flags().Int64Var(&minFree, "min-free", 1<<30, "Espacio libre mínimo requerido en destino (bytes)")
 	cmd.Flags().BoolVar(&removeSource, "remove-source", false, "Borra cada comprimido del origen tras extraerlo con éxito")
 	cmd.Flags().StringVar(&errorDir, "error-dir", "", "Directorio de cuarentena para los que fallan (por defecto, .errores junto a dest)")
+	cmd.Flags().StringVar(&password, "password", "", "Contraseña para archivos cifrados (RAR y 7z)")
 
 	cmd.MarkFlagRequired("src")
 	cmd.MarkFlagRequired("dest")

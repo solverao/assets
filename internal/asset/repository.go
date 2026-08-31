@@ -88,9 +88,9 @@ func (r *sqliteRepo) SearchAssets(userID, query string, limit int) ([]Asset, err
 	rows, err := r.db.Query(`
 		SELECT a.id, a.user_id, a.parent_id, a.asset_blob_id, a.type, a.slug, a.name
 		FROM assets_fts f
-		JOIN assets a ON a.id = f.docid
-		WHERE f.assets_fts MATCH ? AND a.user_id = ?
-		ORDER BY a.name LIMIT ?`, match, userID, limit)
+		JOIN assets a ON a.id = f.rowid
+		WHERE assets_fts MATCH ? AND a.user_id = ?
+		ORDER BY bm25(assets_fts) LIMIT ?`, match, userID, limit)
 	if err != nil {
 		return nil, err
 	}

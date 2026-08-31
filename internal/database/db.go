@@ -6,7 +6,7 @@ import (
 	"os"
 	"path/filepath"
 
-	_ "github.com/mattn/go-sqlite3"
+	_ "modernc.org/sqlite"
 )
 
 func InitDB(dbPath string) (*sql.DB, error) {
@@ -18,9 +18,7 @@ func InitDB(dbPath string) (*sql.DB, error) {
 		}
 	}
 
-	// WAL mode y timeout son vitales para evitar "database is locked"
-	dsn := fmt.Sprintf("file:%s?_fk=1&_journal_mode=WAL&_synchronous=NORMAL&_busy_timeout=5000", dbPath)
-	db, err := sql.Open("sqlite3", dsn)
+	db, err := sql.Open("sqlite", dbDSN(dbPath))
 	if err != nil {
 		return nil, err
 	}
@@ -33,4 +31,13 @@ func InitDB(dbPath string) (*sql.DB, error) {
 		return nil, err
 	}
 	return db, nil
+}
+
+// dbDSN construye el DSN de modernc.org/sqlite. WAL mode y timeout son
+// vitales para evitar "database is locked".
+func dbDSN(dbPath string) string {
+	if dbPath == ":memory:" {
+		return "file::memory:?_pragma=foreign_keys(1)&_pragma=busy_timeout(5000)"
+	}
+	return "file:" + dbPath + "?_pragma=foreign_keys(1)&_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)&_pragma=busy_timeout(5000)"
 }

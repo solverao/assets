@@ -22,6 +22,10 @@ y el proyecto sigue [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Flag `--min-free` en `extract`, `process` e `ingest`.
 - Flag `--remove-source` en `extract`, `process` e `ingest`.
 - Flag `--error-dir` (cuarentena) y manifiesto `errores.txt` para archivos corruptos o incompletos.
+- Flag `--password` para comprimidos cifrados (RAR y 7z).
+- Cancelación de la extracción vía `context.Context` (Ctrl+C).
+- Aislamiento de código dependiente de SO con build tags (compila en Windows y macOS).
+- Migración del driver de SQLite a `modernc.org/sqlite` (pure Go, sin cgo) y búsqueda full-text FTS5.
 - Soporte de comprimidos multiparte RAR (`.part1.rar`) y 7z (`.7z.001`).
 - Protección contra zip-slip y symlinks, y límite de tamaño por archivo descomprimido.
 

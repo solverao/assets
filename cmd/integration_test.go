@@ -24,7 +24,9 @@ func TestIntegrationPipeline(t *testing.T) {
 		"Proyecto Demo/archivo Uno.txt": "contenido",
 	})
 
-	if err := extract.NewExtractorService().ExtractAll(src, dest, 2, false, 0, false, ""); err != nil {
+	if err := extract.NewExtractorService().ExtractAll(context.Background(), extract.ExtractOptions{
+		Src: src, Dest: dest, Workers: 2,
+	}); err != nil {
 		t.Fatal(err)
 	}
 	if err := normalize.NewNormalizerService().NormalizeAll(dest, false); err != nil {
@@ -69,7 +71,7 @@ func TestIngestProcessesAndIndexes(t *testing.T) {
 		extract.NewExtractorService(),
 		normalize.NewNormalizerService(),
 		checksum.NewChecksumService(),
-		src, dest, dbPath, 0, false, "", false); err != nil {
+		src, dest, dbPath, 0, false, "", "", false); err != nil {
 		t.Fatal(err)
 	}
 

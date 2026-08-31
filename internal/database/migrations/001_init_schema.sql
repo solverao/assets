@@ -146,23 +146,23 @@ CREATE TABLE `asset_attribute_values` (
 CREATE UNIQUE INDEX `asset_attribute_values_asset_value_unique` ON `asset_attribute_values` (`asset_id`,`value_id`);
 CREATE INDEX `asset_attribute_values_value_idx` ON `asset_attribute_values` (`value_id`);
 
--- Índice de búsqueda full-text (FTS4, disponible sin flags de compilación)
--- sobre nombre y descripción de assets.
-CREATE VIRTUAL TABLE `assets_fts` USING fts4(
-	content='assets',
+-- Índice de búsqueda full-text (FTS5) sobre nombre y descripción de assets.
+CREATE VIRTUAL TABLE `assets_fts` USING fts5(
 	`name`,
-	`description`
+	`description`,
+	content='assets',
+	content_rowid='id'
 );
 
 CREATE TRIGGER `assets_fts_insert` AFTER INSERT ON `assets` BEGIN
-	INSERT INTO `assets_fts`(`docid`, `name`, `description`) VALUES (new.`id`, new.`name`, new.`description`);
+	INSERT INTO `assets_fts`(`rowid`, `name`, `description`) VALUES (new.`id`, new.`name`, new.`description`);
 END;
 
 CREATE TRIGGER `assets_fts_delete` AFTER DELETE ON `assets` BEGIN
-	DELETE FROM `assets_fts` WHERE `docid` = old.`id`;
+	INSERT INTO `assets_fts`(`assets_fts`, `rowid`, `name`, `description`) VALUES ('delete', old.`id`, old.`name`, old.`description`);
 END;
 
 CREATE TRIGGER `assets_fts_update` AFTER UPDATE ON `assets` BEGIN
-	DELETE FROM `assets_fts` WHERE `docid` = old.`id`;
-	INSERT INTO `assets_fts`(`docid`, `name`, `description`) VALUES (new.`id`, new.`name`, new.`description`);
+	INSERT INTO `assets_fts`(`assets_fts`, `rowid`, `name`, `description`) VALUES ('delete', old.`id`, old.`name`, old.`description`);
+	INSERT INTO `assets_fts`(`rowid`, `name`, `description`) VALUES (new.`id`, new.`name`, new.`description`);
 END;
