@@ -24,6 +24,23 @@ func TestGenerateSlugEmpty(t *testing.T) {
 	}
 }
 
+func TestGenerateSlugInternational(t *testing.T) {
+	cases := map[string]string{
+		"café.txt": "cafe.txt",
+		"niño":     "nino",
+		"Müller":   "muller",
+		"Москва":   "moskva",
+		"Ελλάδα":   "ellada",
+		"影師":       "ying-shi",
+		"foo_bar":  "foo-bar",
+	}
+	for in, want := range cases {
+		if got := Slugify(in, false); got != want {
+			t.Errorf("Slugify(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
 func TestNormalizeAll(t *testing.T) {
 	dir := t.TempDir()
 	sub := filepath.Join(dir, "Mi Carpeta")

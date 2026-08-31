@@ -4,9 +4,10 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"regexp"
 	"sort"
 	"strings"
+
+	"github.com/gosimple/slug"
 )
 
 // NormalizerService encapsula la lógica de normalización de nombres.
@@ -15,8 +16,6 @@ type NormalizerService struct{}
 func NewNormalizerService() *NormalizerService {
 	return &NormalizerService{}
 }
-
-var slugRegex = regexp.MustCompile(`[^a-z0-9]+`)
 
 // NormalizeAll renombra recursivamente archivos y carpetas a slugs.
 func (s *NormalizerService) NormalizeAll(targetDir string, dryRun bool) error {
@@ -85,7 +84,8 @@ func (s *NormalizerService) NormalizeAll(targetDir string, dryRun bool) error {
 	return nil
 }
 
-// Slugify convierte un nombre en slug normalizado.
+// Slugify convierte un nombre en slug normalizado (transliteración
+// Unicode -> ASCII y guiones).
 func Slugify(name string, isDir bool) string {
 	var ext, base string
 	if isDir {
@@ -94,11 +94,10 @@ func Slugify(name string, isDir bool) string {
 		ext = strings.ToLower(filepath.Ext(name))
 		base = strings.TrimSuffix(name, filepath.Ext(name))
 	}
-	slug := strings.ToLower(base)
-	slug = slugRegex.ReplaceAllString(slug, "-")
-	slug = strings.Trim(slug, "-")
-	if slug == "" {
-		slug = "item"
+	s := slug.Make(base)
+	s = strings.ReplaceAll(s, "_", "-")
+	if s == "" {
+		s = "item"
 	}
-	return slug + ext
+	return s + ext
 }

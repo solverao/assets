@@ -61,8 +61,9 @@ asset normalize -d <directorio>
 
 Reglas:
 
+- Los acentos y alfabetos no latinos se transliteran a ASCII (p. ej. `café` → `cafe`, `Москва` → `moskva`, `影師` → `ying-shi`).
 - Todo pasa a minúsculas.
-- Los caracteres que no son `a-z0-9` se convierten en `-`.
+- Los caracteres que no son `a-z0-9` se convierten en `-` (incluido `_`).
 - La extensión se conserva en minúsculas.
 - Si el nombre queda vacío, se usa `item`.
 - En caso de colisión se añade un sufijo numérico (`-1`, `-2`, ...).

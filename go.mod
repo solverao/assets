@@ -4,6 +4,7 @@ go 1.25.0
 
 require (
 	github.com/bodgit/sevenzip v1.6.5
+	github.com/gosimple/slug v1.15.0
 	github.com/nwaples/rardecode v1.1.3
 	github.com/schollz/progressbar/v3 v3.19.1
 	github.com/spf13/cobra v1.10.2
@@ -17,6 +18,7 @@ require (
 	github.com/bodgit/windows v1.0.1 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/google/uuid v1.6.0 // indirect
+	github.com/gosimple/unidecode v1.0.1 // indirect
 	github.com/hashicorp/golang-lru/v2 v2.0.7 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
 	github.com/klauspost/compress v1.19.2 // indirect

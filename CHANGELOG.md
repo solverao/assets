@@ -10,7 +10,7 @@ y el proyecto sigue [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Añadido
 
 - Subcomando `extract` para extraer `.zip`, `.tar.gz`, `.tgz`, `.rar` y `.7z` de forma concurrente.
-- Subcomando `normalize` para renombrar archivos y carpetas a *slugs*.
+- Subcomando `normalize` para renombrar archivos y carpetas a *slugs* (con transliteración Unicode → ASCII vía `gosimple/slug`).
 - Subcomando `checksum` que genera `checksums.txt` con SHA-256.
 - Subcomando `process` que encadena `Extract -> Normalize -> Checksum -> Move`.
 - Subcomando `ingest` que ejecuta `process` e indexa el resultado en la base de datos.
